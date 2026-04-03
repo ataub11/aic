@@ -1,0 +1,364 @@
+# ant_test_config.yaml
+#
+# Engine config that exercises the ANT policy across the training scenarios
+# that contain actual insertable port links (nic_card_mount → sfp_port_0_link,
+# sc_port → sc_port_base_link).
+#
+# Of the 20 training scenarios, only 4 have physically-achievable insertion
+# tasks given the cable type spawned:
+#
+#   Scenario  5  – SFP insertion, board yaw +17°, NIC card present
+#   Scenario 14  – SFP insertion, board yaw -45°, NIC card + SC mount bracket
+#   Scenario 15  – SC  insertion, board yaw +17°, SC port present
+#                  (cable changed to sfp_sc_cable_reversed so SC tip is at gripper)
+#   Scenario 20  – SFP insertion, board yaw +45°, full board (NIC + SC port + mounts)
+#
+# Scenarios 1-4, 6-8, 10-13, 16-17, 19   only have passive mount brackets
+#   (no insertable port links) — excluded.
+# Scenarios 9, 18   have a NIC card but a reversed cable (SC tip at gripper),
+#   so they cannot perform SFP insertion — excluded.
+#
+# Run with:
+#   Terminal A – simulation:
+#     distrobox enter -r aic_eval -- /entrypoint.sh \
+#       spawn_task_board:=true spawn_cable:=true attach_cable_to_gripper:=true \
+#       ground_truth:=false start_aic_engine:=true shutdown_on_aic_engine_exit:=false \
+#       aic_engine_config_file:=$HOME/IndustryChallenge/ws_aic/src/aic/aic_engine/config/ant_test_config.yaml \
+#       initial_joint_positions:="[0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]"
+#
+#   Terminal B – policy:
+#     cd ~/IndustryChallenge/ws_aic/src/aic
+#     pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=ant_policy_node.ANT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scoring topics (unchanged from sample_config)
+# ─────────────────────────────────────────────────────────────────────────────
+scoring:
+  topics:
+    - topic:
+        name: "/joint_states"
+        type: "sensor_msgs/msg/JointState"
+    - topic:
+        name: "/tf"
+        type: "tf2_msgs/msg/TFMessage"
+    - topic:
+        name: "/tf_static"
+        type: "tf2_msgs/msg/TFMessage"
+        latched: true
+    - topic:
+        name: "/scoring/tf"
+        type: "tf2_msgs/msg/TFMessage"
+    - topic:
+        name: "/aic/gazebo/contacts/off_limit"
+        type: "ros_gz_interfaces/msg/Contacts"
+    - topic:
+        name: "/fts_broadcaster/wrench"
+        type: "geometry_msgs/msg/WrenchStamped"
+    - topic:
+        name: "/aic_controller/joint_commands"
+        type: "aic_control_interfaces/msg/JointMotionUpdate"
+    - topic:
+        name: "/aic_controller/pose_commands"
+        type: "aic_control_interfaces/msg/MotionUpdate"
+    - topic:
+        name: "/scoring/insertion_event"
+        type: "std_msgs/msg/String"
+    - topic:
+        name: "/aic_controller/controller_state"
+        type: "aic_control_interfaces/msg/ControllerState"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task board spawn limits (clamps entity translations to safe ranges)
+# ─────────────────────────────────────────────────────────────────────────────
+task_board_limits:
+  nic_rail:
+    min_translation: -0.048
+    max_translation: 0.036
+  sc_rail:
+    min_translation: -0.055
+    max_translation: 0.055
+  mount_rail:
+    min_translation: -0.09625
+    max_translation: 0.09625
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trials
+# ─────────────────────────────────────────────────────────────────────────────
+trials:
+
+  # ── Trial 1  (generate_scenarios.sh scenario 5) ───────────────────────────
+  # SFP insertion.  Board slightly offset and rotated +17°.
+  # NIC card on rail 0 + SFP mount bracket on mount rail 0.
+  trial_scenario_05:
+    scene:
+      task_board:
+        pose:
+          x: 0.28
+          y: -0.05
+          z: 1.1
+          roll: 0.0
+          pitch: 0.0
+          yaw: 0.3
+        nic_rail_0:
+          entity_present: True
+          entity_name: "nic_card_0"
+          entity_pose:
+            translation: 0.005
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        nic_rail_1:
+          entity_present: False
+        nic_rail_2:
+          entity_present: False
+        nic_rail_3:
+          entity_present: False
+        nic_rail_4:
+          entity_present: False
+        sc_rail_0:
+          entity_present: False
+        sc_rail_1:
+          entity_present: False
+        sfp_mount_rail_0:
+          entity_present: True
+          entity_name: "sfp_mount_0"
+          entity_pose:
+            translation: -0.09
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+      cables:
+        cable_0:
+          pose:
+            gripper_offset:
+              x: 0.0
+              y: 0.015385
+              z: 0.04245
+            roll: 0.4432
+            pitch: -0.4838
+            yaw: 1.3303
+          attach_cable_to_gripper: True
+          cable_type: "sfp_sc_cable"
+    tasks:
+      task_1:
+        cable_type: "sfp_sc"
+        cable_name: "cable_0"
+        plug_type: "sfp"
+        plug_name: "sfp_tip"
+        port_type: "sfp"
+        port_name: "sfp_port_0"
+        target_module_name: "nic_card_mount_0"
+        time_limit: 180
+
+  # ── Trial 2  (generate_scenarios.sh scenario 14) ──────────────────────────
+  # SFP insertion.  Board raised and rotated -45°.
+  # NIC card on rail 0.  SC mount bracket also present (visual distractor).
+  trial_scenario_14:
+    scene:
+      task_board:
+        pose:
+          x: 0.35
+          y: 0.0
+          z: 1.25
+          roll: 0.0
+          pitch: 0.0
+          yaw: -0.785
+        nic_rail_0:
+          entity_present: True
+          entity_name: "nic_card_0"
+          entity_pose:
+            translation: 0.005
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        nic_rail_1:
+          entity_present: False
+        nic_rail_2:
+          entity_present: False
+        nic_rail_3:
+          entity_present: False
+        nic_rail_4:
+          entity_present: False
+        sc_rail_0:
+          entity_present: False
+        sc_rail_1:
+          entity_present: False
+        sc_mount_rail_0:
+          entity_present: True
+          entity_name: "sc_mount_0"
+          entity_pose:
+            translation: -0.09
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+      cables:
+        cable_0:
+          pose:
+            gripper_offset:
+              x: 0.0
+              y: 0.015385
+              z: 0.04245
+            roll: 0.4432
+            pitch: -0.4838
+            yaw: 1.3303
+          attach_cable_to_gripper: True
+          cable_type: "sfp_sc_cable"
+    tasks:
+      task_1:
+        cable_type: "sfp_sc"
+        cable_name: "cable_0"
+        plug_type: "sfp"
+        plug_name: "sfp_tip"
+        port_type: "sfp"
+        port_name: "sfp_port_0"
+        target_module_name: "nic_card_mount_0"
+        time_limit: 180
+
+  # ── Trial 3  (generate_scenarios.sh scenario 15, cable adjusted) ──────────
+  # SC insertion.  Board at same position as scenario 5 but yaw +17°.
+  # SC port on rail 0.
+  # NOTE: generate_scenarios.sh used sfp_sc_cable for this scenario, but SC
+  # insertion requires the SC tip to be at the gripper.  Cable changed to
+  # sfp_sc_cable_reversed (SC tip at gripper end).
+  trial_scenario_15:
+    scene:
+      task_board:
+        pose:
+          x: 0.28
+          y: -0.05
+          z: 1.1
+          roll: 0.0
+          pitch: 0.0
+          yaw: 0.3
+        nic_rail_0:
+          entity_present: False
+        nic_rail_1:
+          entity_present: False
+        nic_rail_2:
+          entity_present: False
+        nic_rail_3:
+          entity_present: False
+        nic_rail_4:
+          entity_present: False
+        sc_rail_0:
+          entity_present: True
+          entity_name: "sc_port_0"
+          entity_pose:
+            translation: -0.04
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        sc_rail_1:
+          entity_present: False
+      cables:
+        cable_0:
+          pose:
+            gripper_offset:
+              x: 0.0
+              y: 0.015385
+              z: 0.04045
+            roll: 0.4432
+            pitch: -0.4838
+            yaw: 1.3303
+          attach_cable_to_gripper: True
+          cable_type: "sfp_sc_cable_reversed"
+    tasks:
+      task_1:
+        cable_type: "sfp_sc"
+        cable_name: "cable_0"
+        plug_type: "sc"
+        plug_name: "sc_tip"
+        port_type: "sc"
+        port_name: "sc_port_base"
+        target_module_name: "sc_port_0"
+        time_limit: 180
+
+  # ── Trial 4  (generate_scenarios.sh scenario 20) ──────────────────────────
+  # SFP insertion.  Full board — NIC card, SC port, SFP mount bracket,
+  # SC mount bracket all present.  Board rotated +45°.
+  trial_scenario_20:
+    scene:
+      task_board:
+        pose:
+          x: 0.3
+          y: -0.1
+          z: 1.2
+          roll: 0.0
+          pitch: 0.0
+          yaw: 0.785
+        nic_rail_0:
+          entity_present: True
+          entity_name: "nic_card_0"
+          entity_pose:
+            translation: 0.005
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        nic_rail_1:
+          entity_present: False
+        nic_rail_2:
+          entity_present: False
+        nic_rail_3:
+          entity_present: False
+        nic_rail_4:
+          entity_present: False
+        sc_rail_0:
+          entity_present: True
+          entity_name: "sc_port_0"
+          entity_pose:
+            translation: -0.04
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        sc_rail_1:
+          entity_present: False
+        sfp_mount_rail_0:
+          entity_present: True
+          entity_name: "sfp_mount_0"
+          entity_pose:
+            translation: -0.08
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+        sc_mount_rail_0:
+          entity_present: True
+          entity_name: "sc_mount_0"
+          entity_pose:
+            translation: -0.09
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
+      cables:
+        cable_0:
+          pose:
+            gripper_offset:
+              x: 0.0
+              y: 0.015385
+              z: 0.04245
+            roll: 0.4432
+            pitch: -0.4838
+            yaw: 1.3303
+          attach_cable_to_gripper: True
+          cable_type: "sfp_sc_cable"
+    tasks:
+      task_1:
+        cable_type: "sfp_sc"
+        cable_name: "cable_0"
+        plug_type: "sfp"
+        plug_name: "sfp_tip"
+        port_type: "sfp"
+        port_name: "sfp_port_0"
+        target_module_name: "nic_card_mount_0"
+        time_limit: 180
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Robot home position (used between tasks)
+# ─────────────────────────────────────────────────────────────────────────────
+robot:
+  home_joint_positions:
+    shoulder_pan_joint: -0.1597
+    shoulder_lift_joint: -1.3542
+    elbow_joint: -1.6648
+    wrist_1_joint: -1.6933
+    wrist_2_joint: 1.5710
+    wrist_3_joint: 1.4110
