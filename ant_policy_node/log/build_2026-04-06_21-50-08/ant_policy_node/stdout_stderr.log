@@ -1,0 +1,28 @@
+running egg_info
+creating build/ant_policy_node/ant_policy_node.egg-info
+writing build/ant_policy_node/ant_policy_node.egg-info/PKG-INFO
+writing dependency_links to build/ant_policy_node/ant_policy_node.egg-info/dependency_links.txt
+writing requirements to build/ant_policy_node/ant_policy_node.egg-info/requires.txt
+writing top-level names to build/ant_policy_node/ant_policy_node.egg-info/top_level.txt
+writing manifest file 'build/ant_policy_node/ant_policy_node.egg-info/SOURCES.txt'
+reading manifest file 'build/ant_policy_node/ant_policy_node.egg-info/SOURCES.txt'
+writing manifest file 'build/ant_policy_node/ant_policy_node.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node
+copying ant_policy_node/ANT.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node
+copying ant_policy_node/stage1_debug.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node
+copying ant_policy_node/__init__.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node
+copying ant_policy_node/py.typed -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node
+running install
+running install_lib
+copying /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/build/lib/ant_policy_node/ANT.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node
+byte-compiling /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py to ANT.cpython-312.pyc
+running install_data
+copying resource/ant_policy_node -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/share/ament_index/resource_index/packages
+copying package.xml -> /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/share/ant_policy_node
+running install_egg_info
+removing '/home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node-0.0.0-py3.12.egg-info' (and everything under it)
+Copying build/ant_policy_node/ant_policy_node.egg-info to /home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node-0.0.0-py3.12.egg-info
+running install_scripts
+writing list of installed files to '/home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node/build/ant_policy_node/install.log'
