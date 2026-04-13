@@ -1,0 +1,27 @@
+[0.997s] Invoking command in '/home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PIXI_PROMPT=(aic) PYTHONPATH=/home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/ant_policy_node build --build-base /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build install --record /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/install.log --single-version-externally-managed install_data
+[1.299s] running egg_info
+[1.325s] writing ../build/ant_policy_node/ant_policy_node.egg-info/PKG-INFO
+[1.325s] writing dependency_links to ../build/ant_policy_node/ant_policy_node.egg-info/dependency_links.txt
+[1.326s] writing requirements to ../build/ant_policy_node/ant_policy_node.egg-info/requires.txt
+[1.326s] writing top-level names to ../build/ant_policy_node/ant_policy_node.egg-info/top_level.txt
+[1.378s] reading manifest file '../build/ant_policy_node/ant_policy_node.egg-info/SOURCES.txt'
+[1.380s] writing manifest file '../build/ant_policy_node/ant_policy_node.egg-info/SOURCES.txt'
+[1.380s] running build
+[1.380s] running build_py
+[1.380s] copying ant_policy_node/ANT.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build/lib/ant_policy_node
+[1.380s] copying ant_policy_node/stage1_debug.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build/lib/ant_policy_node
+[1.380s] copying ant_policy_node/__init__.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build/lib/ant_policy_node
+[1.381s] copying ant_policy_node/py.typed -> /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build/lib/ant_policy_node
+[1.381s] running install
+[1.386s] running install_lib
+[1.411s] copying /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build/lib/ant_policy_node/ANT.py -> /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node
+[1.412s] byte-compiling /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py to ANT.cpython-312.pyc
+[1.422s] running install_data
+[1.422s] copying resource/ant_policy_node -> /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/share/ament_index/resource_index/packages
+[1.422s] copying package.xml -> /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/share/ant_policy_node
+[1.423s] running install_egg_info
+[1.447s] removing '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node-0.0.0-py3.12.egg-info' (and everything under it)
+[1.447s] Copying ../build/ant_policy_node/ant_policy_node.egg-info to /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node-0.0.0-py3.12.egg-info
+[1.448s] running install_scripts
+[1.499s] writing list of installed files to '/home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/install.log'
+[1.517s] Invoked command in '/home/ataub/IndustryChallenge/ws_aic/src/aic/ant_policy_node' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PIXI_PROMPT=(aic) PYTHONPATH=/home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/ant_policy_node build --build-base /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/build install --record /home/ataub/IndustryChallenge/ws_aic/src/aic/build/ant_policy_node/install.log --single-version-externally-managed install_data

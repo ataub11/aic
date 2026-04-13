@@ -128,14 +128,6 @@ class ANT(Policy):
         self.pre_scout_joint_positions = [-0.1597, -1.3542, -1.6648, -1.6933, 1.5710, 1.4110]
         self.joint_stiffness = [200.0, 200.0, 200.0, 100.0, 100.0, 100.0]
         self.joint_damping = [80.0, 80.0, 80.0, 40.0, 40.0, 40.0]
-        # Tolerance to skip joint phase.  Set to a large value (100 rad >> any
-        # joint range) so the joint-space phase is ALWAYS skipped.  The joint
-        # phase was found to cause 200 N+ cable-drag force spikes when the arm
-        # carries over a non-home posture from a prior trial, which accumulates
-        # >1 s above 20 N and triggers the scoring force penalty.  The arm
-        # starts within 31 cm of the board zone at any end-of-trial posture, so
-        # the Cartesian stages can reach the port directly without pre-homing.
-        self.pre_scout_position_tolerance = 100.0  # rad — effectively always skip
 
         # ---- cable-load baseline calibration --------------------------------
         self.cable_force_baseline_default = 22.5  # N — fallback if calibration fails
@@ -157,28 +149,11 @@ class ANT(Policy):
     _WS_Y = (0.06, 0.65)
     _WS_Z = (0.00, 0.30)
 
-    # Vision grid: 13 positions covering the board face in 3 rings.
-    #   Ring 1 — cardinals at 40 mm        (4 pts)
-    #   Ring 2 — diagonals at 60 mm radius (4 pts, ~42 mm per axis)
-    #   Ring 3 — cardinals at 90 mm        (4 pts)
-    # Used at transit_z only — stalls do not corrupt back-projection since TF
-    # gives the actual camera pose wherever the arm ends up.
-    _GRID_DIAG = 0.060 / (2 ** 0.5)   # ≈ 0.0424 m per axis
-    _GRID_OFFSETS = (
-        ( 0.000,        0.000),
-        (+0.040,        0.000), ( 0.000, +0.040), (-0.040,        0.000), ( 0.000, -0.040),
-        (+_GRID_DIAG, +_GRID_DIAG), (-_GRID_DIAG, +_GRID_DIAG),
-        (-_GRID_DIAG, -_GRID_DIAG), (+_GRID_DIAG, -_GRID_DIAG),
-        (+0.090,        0.000), ( 0.000, +0.090), (-0.090,        0.000), ( 0.000, -0.090),
-    )
-
     # Stage 3 spiral: centre + fine rings (5/10/15/20 mm) + coarse rings
-    # (40/60/80/110 mm).  Fine rings handle ±2 cm vision error (typical SFP).
-    # Coarse rings cover the SC stall-collapse case: Stage 1 falls back to the
-    # calibrated zone (= actual competition T3 port), but cable tension may leave
-    # Stage 2 stalled up to ~10 cm short.  The 110 mm ring covers the full gap.
-    # Each ring also includes the 4 diagonal directions (±r/√2 per axis) so
-    # that ports offset diagonally from the zone centre are reachable.
+    # (40/60/80/110 mm).  Used only by the generic spiral descent path (not
+    # reached in competition — SFP and SC both use direct descent).
+    # Each ring includes the 4 diagonal directions (±r/√2 per axis) so that
+    # ports offset diagonally from the zone centre are reachable.
     _D40 = 0.040 / (2 ** 0.5)   # ≈ 0.0283 m per axis at 40 mm radius
     _D60 = 0.060 / (2 ** 0.5)   # ≈ 0.0424 m per axis
     _D80 = 0.080 / (2 ** 0.5)   # ≈ 0.0566 m per axis
@@ -201,6 +176,27 @@ class ANT(Policy):
         (+0.110,  0.000), ( 0.000, +0.110), (-0.110,  0.000), ( 0.000, -0.110),
         (+_D110, +_D110), (-_D110, +_D110), (-_D110, -_D110), (+_D110, -_D110),
     )
+
+    # SC pre-scan: visit lateral offset positions at a higher Z so the camera
+    # can see the SC port housing from an angle.  The SC cable plug always hangs
+    # directly below the TCP and appears at image centre; from an offset position
+    # the plug remains at centre while the housing shifts toward the image
+    # periphery.  A centre-masked detector then suppresses the plug and detects
+    # the housing blob.
+    #
+    # Offsets are in base_link (m), applied relative to zone_scouting_xy["sc"].
+    # +X is toward robot base (−world_X direction); +Y is toward operator.
+    # Workspace check (_WS_X / _WS_Y) is applied at runtime.
+    # Bug 58 (Run 22): SC cable plug appears at the IMAGE BOTTOM (v≈779, bottom 13%
+    # in a ~900 px frame) — well outside the 30% centre mask.  The SC housing is
+    # visible in the RGB image but its area exceeds max_area=10k px² from the stall
+    # position (14–22 cm from targets), so the plug wins detection every time.
+    # Back-projection lands 18–19 cm from zone centre, rejected by proximity filter;
+    # calibrated zone fallback is always correct.  Net effect: 53 s wasted with no
+    # localisation improvement.  Disabled until a stall-proof detection method exists.
+    _SC_PRESCAN_OFFSETS = ()      # disabled — see Bug 58
+    _SC_PRESCAN_Z_ABOVE = 0.18    # m above connector_z (retained for future re-enable)
+    _SC_PRESCAN_MASK_FRAC = 0.30  # fraction of image W and H to mask at centre
 
     # ======================================================================
     # Vision localisation helpers
@@ -243,41 +239,49 @@ class ANT(Policy):
             )
             return None
 
-    def _detect_port_pixel(self, image_msg):
-        """Detect the SC port housing in a camera image.
+    def _detect_port_pixel_sc_prescan(self, image_msg):
+        """SC port detector for lateral pre-scan positions.
 
-        The port housing is a bright square (beige/tan) on a darker board face.
-        Detected via normal Otsu threshold (THRESH_BINARY, not INV) which makes
-        bright regions white; the housing is the largest compact bright blob.
+        From a laterally-offset arm position the cable plug hangs directly below
+        the TCP and appears at/near the image centre, while the SC port housing
+        appears off-centre.  This detector masks the central _SC_PRESCAN_MASK_FRAC
+        region to suppress the plug, then uses Otsu thresholding on the remainder
+        to find the housing blob.
 
-        Note: SFP uses a calibrated fast-path (HSV blind from above at transit_z)
-        and never calls this method.
+        Scoring uses area × circularity only (no centre-distance penalty) because
+        the housing is expected to appear near the image periphery.
 
         Returns (u, v) pixel centroid of the best candidate, or None.
         """
         if len(image_msg.data) == 0:
             return None
 
-        # Decode RGB8 image (R8G8B8 format from Gazebo)
         img = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
             (image_msg.height, image_msg.width, 3)
         )
+        h, w = img.shape[:2]
+        cx_img = w / 2.0
+        cy_img = h / 2.0
 
-        cx_img = image_msg.width / 2.0
-        cy_img = image_msg.height / 2.0
-
-        # SC port housing is a bright (beige/tan) square against the
-        # darker board face.  Normal Otsu (THRESH_BINARY) makes bright
-        # pixels white so the housing appears as a positive blob.
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-        _, mask = cv2.threshold(
-            blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-        min_area = 500     # SC housing is much larger than screw-hole noise
-        max_area = 10000   # reject large blobs (yellow cable ~74k px²)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Mask centre region (cable plug lives here).
+        mw = int(w * self._SC_PRESCAN_MASK_FRAC / 2)
+        mh = int(h * self._SC_PRESCAN_MASK_FRAC / 2)
+        x1, x2 = int(cx_img) - mw, int(cx_img) + mw
+        y1, y2 = int(cy_img) - mh, int(cy_img) + mh
+        masked = gray.copy()
+        masked[y1:y2, x1:x2] = 0
+
+        blurred = cv2.GaussianBlur(masked, (7, 7), 0)
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Zero out centre in threshold result too (suppress partial-plug blobs).
+        thresh[y1:y2, x1:x2] = 0
+
+        min_area = 500
+        max_area = 10000
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
 
@@ -294,11 +298,9 @@ class ANT(Policy):
             perimeter = cv2.arcLength(cnt, True)
             if perimeter < 1:
                 continue
-            # Circularity = 4π·area/perimeter² (1.0 = perfect circle, <1 = elongated)
             circularity = 4 * np.pi * area / (perimeter ** 2)
-            dist_from_centre = np.hypot(u - cx_img, v - cy_img)
-            # Score: large area + compact shape + close to image centre
-            score = area * circularity / (dist_from_centre + 1.0)
+            # No centre-distance penalty — housing is expected off-centre here.
+            score = area * circularity
             candidates.append((score, u, v, area))
 
         if not candidates:
@@ -306,15 +308,16 @@ class ANT(Policy):
 
         candidates.sort(reverse=True)
         best_score, u_best, v_best, area_best = candidates[0]
-        if best_score < 1.0:
+        min_score = 200.0  # min_area(500) × min_circularity(0.4) — clutter floor
+        if best_score < min_score:
             self.get_logger().info(
-                f"Stage 1 vision: best candidate score={best_score:.1f} < 1.0 "
-                f"(area={area_best:.0f} px²) — rejecting as likely clutter"
+                f"Stage 1 SC pre-scan vision: best score={best_score:.0f} < {min_score:.0f} "
+                f"(area={area_best:.0f} px²) — rejecting as clutter"
             )
             return None
         self.get_logger().info(
-            f"Stage 1 vision: port pixel ({u_best:.0f}, {v_best:.0f}) "
-            f"area={area_best:.0f} px² score={best_score:.1f}"
+            f"Stage 1 SC pre-scan vision: port pixel ({u_best:.0f}, {v_best:.0f}) "
+            f"area={area_best:.0f} px² score={best_score:.0f}"
         )
         return u_best, v_best
 
@@ -406,21 +409,21 @@ class ANT(Policy):
 
     def _run_joint_settle(
         self, duration_sec: float, move_robot, start_time, time_limit_sec,
-        raise_on_timeout: bool = True,
     ) -> None:
         """Drive to pre_scout_joint_positions and hold for duration_sec.
 
-        If the global time limit is reached during the settle window:
-          raise_on_timeout=True  → raises TimeoutError (used during Stage 1 pre-positioning)
-          raise_on_timeout=False → breaks silently (used for end-of-trial return)
+        Breaks silently when the time limit is reached — caller handles budget.
+        Only used for the end-of-SC-trial arm return (SFP trials skip it).
+        Note: the joint-space phase was found to cause 200 N+ cable-drag force
+        spikes when the arm carries over a non-home posture from a prior trial,
+        accumulating >1 s above 20 N and triggering the scoring force penalty.
+        SFP trials skip this entirely for that reason (Bug 52).
         """
         jmu = self._build_joint_motion_update(self.pre_scout_joint_positions)
         settle_start = self.time_now()
         settle_duration = Duration(seconds=duration_sec)
         while (self.time_now() - settle_start) < settle_duration:
             if self._is_timed_out(start_time, time_limit_sec):
-                if raise_on_timeout:
-                    raise TimeoutError("Global timeout during pre-scout pre-positioning")
                 break
             move_robot(joint_motion_update=jmu)
             self.sleep_for(0.1)
@@ -662,25 +665,22 @@ class ANT(Policy):
         self, task, get_observation, move_robot, send_feedback, start_time, time_limit_sec,
         baseline_settle_sec: float = 0.0,
     ) -> Pose:
-        """Vision-based connector localisation: image grid search + back-projection.
+        """Vision-based connector localisation.
 
-        Replaces the FTS grid search (Run 9 failure: probe pre-positions at
-        connector_z+0.04 caused cable-drag stalls 3–14 cm from target, making
-        all 9 probes VOID regardless of board contact).
+        SFP fast path: navigate directly to the calibrated port position.  The SFP
+        bracket is not visible from above (blue/cyan face on the outward surface), so
+        the grid scan always yields nothing.  Stage 3 uses direct descent (Bug 47).
 
-        Algorithm:
-          1. Navigate to calibrated zone XY at transit_z = connector_z + 0.08.
-          2. Grid search (vision): visit 13 positions (_GRID_OFFSETS: centre + 3 rings
-             up to ±90 mm) at transit_z.  At each position (or stall), take the
-             center_camera image and look up the camera pose from TF.  Detect the port
-             housing in the image and back-project the pixel to base_link XY using
-             the known connector_z.
-             Key advantage: stalls do not corrupt the result — the TF still gives the
-             actual camera pose so the back-projection is valid from any arm position.
-          3. Aggregate: 1 estimate → use directly; ≥2 estimates → median-filter,
-             keep inliers within 5 cm, centroid.
-          4. Fallback: 0 valid estimates → return calibrated zone XY so Stage 3's
-             spiral search (±2 cm) can attempt to find the port.
+        SC path: prescan currently DISABLED (_SC_PRESCAN_OFFSETS = ()).  Bug 58 showed
+        the SC cable plug appears at the image bottom (v≈779), not the centre, so the
+        centre mask does not suppress it.  Falls through directly to calibrated zone
+        fallback (correct for competition T3).  Stage 3 uses direct descent (Bug 60).
+
+        Aggregation (both paths use the SC aggregate block):
+          1 estimate → use directly.
+          ≥2 estimates → median-filter, keep inliers within 5 cm, centroid.
+          0 valid estimates → nearest known competition port (Stage 3 descends from
+          the calibrated position).
         """
         zone = "sfp" if task.plug_type == "sfp" else "sc"
         send_feedback(
@@ -745,8 +745,8 @@ class ANT(Policy):
         # debug images confirmed: SFP HSV mask entirely black at every grid position.
         # Also, the 13-position grid wastes ~100 s of trial budget and some grid moves
         # (e.g. (0,+90mm) from T1 centre) pass through Y≈0.233 (NIC mount zone).
-        # Navigate directly to the calibrated port and return; Stage 3's near-port
-        # shortcut (Bugs 42/43 fix) reliably detects the rim signal at connector_z.
+        # Navigate directly to the calibrated port and return; Stage 3 uses direct
+        # descent to connector_z (Bug 47 — SFP generates no detectable axial force).
         if zone == "sfp":
             sfp_ports = self.zone_known_ports["sfp"]
             trial = self._insert_call_count
@@ -829,7 +829,15 @@ class ANT(Policy):
             )
             return self._make_pose(tgt_x, tgt_y, connector_z, orient_final)
 
-        # ---- SC: WP1 Z-adjust + WP2 lateral + vision grid (below) -----------
+        # ---- SC: use higher transit_z for pre-scan (plug always 4 cm below TCP) ----
+        # At normal transit_z (connector_z+0.08 = 0.095 m), the cable plug is only
+        # 4 cm from the camera and always appears at image centre, blocking the view
+        # of the SC housing.  Using transit_z = connector_z+0.18 = 0.195 m gives a
+        # wider FOV (~12.6 cm radius at board level) so that 10 cm offset positions
+        # keep the port housing within the camera frame while the plug stays at centre.
+        transit_z = connector_z + self._SC_PRESCAN_Z_ABOVE
+
+        # ---- SC: WP1 Z-adjust + WP2 lateral + pre-scan (below) -----------
         #
         # Safe-Z entry when arm starts above transit_z (Bug 52 preventative):
         # After SFP arm return is skipped, the arm may sit at SFP insertion depth
@@ -907,37 +915,48 @@ class ANT(Policy):
             obs_wp2 = get_observation()
             orient = obs_wp2.controller_state.tcp_pose.orientation if obs_wp2 else orient
 
-        # ---- Vision grid search --------------------------------------------
-        # Visit 13 positions (_GRID_OFFSETS) at transit_z — see class constant
-        # for layout (centre + 3 rings up to ±90 mm).  Stalls do not corrupt
-        # results because TF gives the actual camera pose wherever the arm ends up.
+        # ---- SC pre-scan: lateral offset positions with centre-masked detection -
+        # The original 13-point grid scan always fails for SC: the cable plug hangs
+        # 4 cm below the TCP and appears as a large bright blob at image centre,
+        # dominating Otsu at every grid position.  Bug 55 (arm-fixed guard) then
+        # discards all estimates → always falls back to calibrated zone.
+        #
+        # Bug 58 (Run 22): prescan disabled — plug appears at image bottom (v≈779),
+        # outside the 30% centre mask.  SC housing too large (436k px² > 10k max_area)
+        # from stall positions 14–22 cm from targets.  Falls directly to calibrated zone.
         estimates = []   # (X, Y) back-projected port estimates in base_link
-        for dx, dy in self._GRID_OFFSETS:
+        pixels    = []   # (u, v) raw pixel detections, parallel to estimates
+        if not self._SC_PRESCAN_OFFSETS:
+            self.get_logger().info(
+                "Stage 1 SC: prescan disabled (Bug 58) — using calibrated zone directly"
+            )
+        for dx, dy in self._SC_PRESCAN_OFFSETS:
             if self._is_timed_out(start_time, time_limit_sec):
                 break
             px, py = base_x + dx, base_y + dy
             if not self._in_workspace_xy(px, py):
+                self.get_logger().info(
+                    f"Stage 1 SC pre-scan: ({dx*1000:+.0f},{dy*1000:+.0f})mm OOB — skipping"
+                )
                 continue
 
-            # Move to grid point at transit_z — vision only, no descent.
             self._move_to_pose_and_wait(
                 self._make_pose(px, py, transit_z, orient),
                 move_robot, get_observation, start_time, time_limit_sec,
-                convergence_m=0.015, stage_timeout_sec=8.0,
-                label=f"Stage 1 grid ({dx*1000:+.0f},{dy*1000:+.0f})mm",
+                convergence_m=0.015, stage_timeout_sec=12.0,
+                label=f"Stage 1 SC pre-scan ({dx*1000:+.0f},{dy*1000:+.0f})mm",
                 check_force=False,
             )
 
-            # Get camera pose and image at this arm position (or stall position).
             cam_in_base = self._get_camera_in_base("center_camera/optical")
             obs_grid = get_observation()
             if cam_in_base is None or obs_grid is None:
                 continue
 
-            pixel = self._detect_port_pixel(obs_grid.center_image)
+            pixel = self._detect_port_pixel_sc_prescan(obs_grid.center_image)
             if pixel is None:
                 self.get_logger().info(
-                    f"Stage 1 vision: ({dx*1000:+.0f},{dy*1000:+.0f})mm — no detection"
+                    f"Stage 1 SC pre-scan: ({dx*1000:+.0f},{dy*1000:+.0f})mm — no detection"
                 )
                 continue
 
@@ -949,49 +968,65 @@ class ANT(Policy):
                 continue
             X, Y = xy
 
-            # Discard back-projections outside the known workspace.
             if not self._in_workspace_xy(X, Y):
                 self.get_logger().info(
-                    f"Stage 1 vision: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
+                    f"Stage 1 SC pre-scan: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
                     f"back-proj ({X:.3f},{Y:.3f}) OOB — discarding"
                 )
                 continue
 
-            # Proximity filter: reject estimates that back-project more than
-            # 7 cm from the zone centre.  Run 16 confirmed that the SFP HSV
-            # detector picks up blue/cyan elements on the SC board (Y≈0.41)
-            # when the arm is at SFP grid positions (Y≈0.25–0.32); those
-            # false detections back-project 18 cm from the zone centre.
-            # Legitimate T1/T2 SFP ports are ±2 cm from zone centre, so 7 cm
-            # leaves ample margin for vision noise while rejecting cross-board
-            # contamination.
             dist_from_zone = np.hypot(X - base_x, Y - base_y)
             if dist_from_zone > 0.07:
                 self.get_logger().info(
-                    f"Stage 1 vision: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
+                    f"Stage 1 SC pre-scan: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
                     f"back-proj ({X:.3f},{Y:.3f}) {dist_from_zone*100:.1f} cm "
-                    f"from zone centre — discarding (wrong feature)"
+                    f"from zone centre — discarding"
                 )
                 continue
 
             self.get_logger().info(
-                f"Stage 1 vision: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
+                f"Stage 1 SC pre-scan: ({dx*1000:+.0f},{dy*1000:+.0f})mm → "
                 f"estimate ({X:.3f},{Y:.3f})"
             )
             estimates.append((X, Y))
+            pixels.append((u, v))
+
+            # Update orient for subsequent moves.
+            obs_after = get_observation()
+            if obs_after is not None:
+                orient = obs_after.controller_state.tcp_pose.orientation
 
         # ---- Aggregate: median filter + centroid ---------------------------
-        # Require only 1 estimate to proceed — SC cable stalls WP2 150-220 mm
-        # short, so all 13 grid positions may execute from the same camera pose
-        # and produce only 1 back-projection.  A single high-score detection
-        # (score ≥ 1.0 already enforced in _detect_port_pixel) from a valid TF
-        # pose is still useful data.
-        #
-        # The 10 cm proximity guard has been removed.  It was added for Run 12
-        # T2 clutter (9.4 cm offset) but now conflicts with the wider ±90 mm
-        # grid: legitimate estimates near the outer ring can be > 10 cm from
-        # the calibrated zone centre.  The score ≥ 1.0 filter and workspace
-        # bounds check are the primary noise guards.
+        # Require only 1 estimate to proceed — a single high-score detection
+        # from a valid TF pose is useful data.
+
+        # Arm-fixed feature guard (Bug 55): reject detections of features that
+        # move with the arm (e.g. the SC cable plug hanging below the gripper).
+        # An arm-fixed feature always appears at nearly the same pixel regardless
+        # of where the arm moves — its world back-projection tracks the arm's XY,
+        # not the port's XY.  Run 20 T3: SC cable plug at pixel (575,767)±1px
+        # across all 13 grid positions; world estimates clustered at arm stall
+        # centroid Y=0.387, 4.25 cm from the actual port at Y=0.4295.
+        # The world-space std guard didn't fire because the arm DID reach slightly
+        # different stall positions (different pos_error per grid point), so
+        # world std > 1 cm.  But pixel std was < 2 px — definitive.
+        # Threshold: arm-fixed → std(u) < 5 px AND std(v) < 5 px.
+        # Port detection from different arm positions shifts pixels significantly
+        # (camera moves 40–90 mm between grid points → tens of pixels shift).
+        if len(pixels) >= 2:
+            us = np.array([p[0] for p in pixels])
+            vs = np.array([p[1] for p in pixels])
+            std_u = float(np.std(us))
+            std_v = float(np.std(vs))
+            if std_u < 5.0 and std_v < 5.0:
+                self.get_logger().warning(
+                    f"Stage 1 vision: arm-fixed feature detected "
+                    f"(pixel std_u={std_u:.1f} px, std_v={std_v:.1f} px < 5 px) "
+                    f"— {len(estimates)} estimates from feature moving with arm "
+                    "(e.g. cable plug below gripper) discarded → calibrated zone fallback"
+                )
+                estimates = []
+                pixels = []
 
         # SC stall-collapse detection: SC cable tension can prevent the arm
         # from reaching any grid position → all 13 grid images come from the
@@ -1045,21 +1080,17 @@ class ANT(Policy):
         # position.  This avoids the zone midpoint (e.g. SFP Y=0.2326) which
         # can clip the NIC card enclosure during descent (Run 16 T1: −24
         # contact penalty).  The individual port positions are safe descent
-        # targets; if the wrong port is chosen the Stage 3 spiral (±110 mm)
-        # recovers the remaining offset.
-        obs_fb = get_observation()
-        if obs_fb is not None:
-            arm_x = obs_fb.controller_state.tcp_pose.position.x
-            arm_y = obs_fb.controller_state.tcp_pose.position.y
-        else:
-            arm_x, arm_y = base_x, base_y
+        # targets; Stage 3 descends directly from the chosen position.
+        # obs_final is guaranteed non-None (_wait_for_observation raises otherwise).
+        arm_x = obs_final.controller_state.tcp_pose.position.x
+        arm_y = obs_final.controller_state.tcp_pose.position.y
         known = self.zone_known_ports.get(zone, [(base_x, base_y)])
         fb_x, fb_y = min(known, key=lambda p: np.hypot(p[0] - arm_x, p[1] - arm_y))
         self.get_logger().warning(
             f"Stage 1 vision: no valid estimate "
             f"({len(estimates)} raw detections, 0 accepted) — "
-            f"nearest known port ({fb_x:.4f},{fb_y:.4f}); "
-            "Stage 3 spiral will search up to ±110 mm"
+            f"nearest known port ({fb_x:.4f},{fb_y:.4f}) — "
+            "Stage 3 will direct-descend from this position"
         )
         return self._make_pose(fb_x, fb_y, connector_z, orient_final)
 
@@ -1125,62 +1156,25 @@ class ANT(Policy):
         self, connector_pose, get_observation, move_robot, send_feedback,
         start_time, time_limit_sec, zone: str = "sc",
     ) -> Pose:
-        """Descend in 2 mm steps until the F/T sensor registers contact.
+        """Descend to the connector face and report the actual TCP contact pose.
 
-        Searches from 5 cm above to 3 cm below the localised connector Z to
-        tolerate residual error in the vision-based depth estimate.
+        SFP (Bug 47) and SC (Bug 60) both use direct descent to connector_z:
+        neither cable type generates detectable axial force at the port entrance,
+        so FTS-based contact detection is structurally blind.  _move_to_pose_and_wait
+        handles stall detection — the arm descends as far as cable tension allows
+        and Stage 4 covers any remaining gap.
 
-        Uses a RUNNING-MINIMUM local baseline during the descent rather than
-        the fixed approach-height calibration.  As the arm descends, cable
-        tension decreases continuously (force drops from ~18 N at approach to
-        ~5-7 N near the port), so the fixed baseline quickly becomes stale and
-        delta = max(0, current-fixed_baseline) stays at 0 even after contact.
-        The running minimum tracks the cable-relaxation trend: any step-up
-        above the local minimum indicates contact, not cable dynamics.
+        A generic FTS running-minimum spiral descent is kept below the early
+        returns for unknown connector types; it is not reached in competition.
         """
         send_feedback("Stage 3: descending to detect contact")
 
         # Initial calibration at approach height — sets the starting local min.
         self._calibrate_cable_baseline(get_observation, start_time, time_limit_sec)
 
-        # Adaptive step size: use 5 mm steps when well above the expected contact
-        # zone (free-space descent) and switch to 2 mm near the port for precise
-        # contact detection.  Roughly halves Step count vs fixed 2 mm.
-        step_coarse_m = 0.005   # far from port (> 5 cm above connector Z)
-        step_fine_m   = 0.002   # near port (≤ 5 cm above connector Z)
-        fine_zone_top = connector_pose.position.z + 0.05
-
-        obs_now = get_observation()
-
-        # Use vision-localised connector XY (from Stage 1), not TCP equilibrium XY.
-        # The grid-search result is more accurate than where the arm settled
-        # under cable tension (which can be 5–10 cm off).  The impedance
-        # controller drives both Z descent and XY correction simultaneously.
-        if obs_now is not None:
-            tcp_z_now = obs_now.controller_state.tcp_pose.position.z
-        else:
-            tcp_z_now = connector_pose.position.z + 0.05
-
-        # Start from the arm's actual Z (wherever Stage 2 stalled).
-        # End 15 cm below the estimated connector Z — generous margin to cover
-        # cases where the FTS-estimated Z is off by up to 10 cm.
-        start_z = tcp_z_now
-        end_z = max(connector_pose.position.z - 0.15, 0.005)
-        self.get_logger().info(
-            f"Stage 3: contact search z={start_z:.4f} → {end_z:.4f} "
-            f"(TCP at {tcp_z_now:.4f}, "
-            f"connector at z={connector_pose.position.z:.4f} "
-            f"XY=({connector_pose.position.x:.3f},{connector_pose.position.y:.3f}))"
-        )
-
         # SFP: direct descent to connector_z — no contact detection.
         # The SFP plug enters its cage without generating detectable axial force
         # (Bugs 46+47: floor blocks T2 signal; T1 yields zero delta at port face).
-        # Descend directly via _move_to_pose_and_wait (not fire-and-forget: the
-        # arm needs 5–15 s to cover the 10 cm from approach_z to connector_z;
-        # a short sleep would read TCP still near approach height → Stage 4 would
-        # push 20 mm from there, ending 7 cm above the port).
-        # Stage 4 force-abort (baseline+3N for 0.3s) catches wrong XY.
         if zone == "sfp":
             self.get_logger().info(
                 f"Stage 3 (SFP): direct descent to "
@@ -1217,6 +1211,70 @@ class ANT(Policy):
             send_feedback("Stage 3: contact detected")
             return target_pose
 
+        # SC: direct descent to connector_z — no contact detection (Bug 60).
+        # Like SFP, the SC cable generates zero axial force at port entrance:
+        # Run 23 confirmed max local_delta=2.06 N at port centre, well below
+        # the 4 N near-port threshold.  The spiral ran all the way to the
+        # workspace floor (z=0.005) with no contact ever detected.
+        if zone == "sc":
+            self.get_logger().info(
+                f"Stage 3 (SC): direct descent to "
+                f"connector_z={connector_pose.position.z:.4f} — skipping contact detection (Bug 60)"
+            )
+            send_feedback("Stage 3: SC direct descent")
+            target_pose = self._make_pose(
+                connector_pose.position.x, connector_pose.position.y,
+                connector_pose.position.z, connector_pose.orientation,
+            )
+            try:
+                self._move_to_pose_and_wait(
+                    target_pose, move_robot, get_observation,
+                    start_time, time_limit_sec,
+                    convergence_m=0.010, stage_timeout_sec=20.0,
+                    label="Stage 3 SC direct descent", check_force=False,
+                )
+            except OutOfReachError:
+                # Timed out — arm stalled short of connector_z under cable load.
+                # Proceed with wherever it stopped; Stage 4 covers the gap.
+                pass
+            obs_sc = get_observation()
+            if obs_sc is not None:
+                tcp = obs_sc.controller_state.tcp_pose
+                self.get_logger().info(
+                    f"Stage 3 (SC): arrived at tcp="
+                    f"({tcp.position.x:.3f},{tcp.position.y:.3f},{tcp.position.z:.3f})"
+                )
+                send_feedback("Stage 3: contact detected")
+                return self._make_pose(
+                    tcp.position.x, tcp.position.y, tcp.position.z,
+                    connector_pose.orientation,
+                )
+            send_feedback("Stage 3: contact detected")
+            return target_pose
+
+        # Generic spiral FTS descent — not reached in competition (SFP and SC
+        # both use direct descent above).  Retained for unknown connector types.
+        # Adaptive step size: 5 mm far from port, 2 mm near it.
+        step_coarse_m = 0.005   # far from port (> 5 cm above connector Z)
+        step_fine_m   = 0.002   # near port (≤ 5 cm above connector Z)
+        fine_zone_top = connector_pose.position.z + 0.05
+
+        obs_now = get_observation()
+        # Use vision-localised connector XY (from Stage 1), not TCP equilibrium XY.
+        if obs_now is not None:
+            tcp_z_now = obs_now.controller_state.tcp_pose.position.z
+        else:
+            tcp_z_now = connector_pose.position.z + 0.05
+
+        start_z = tcp_z_now
+        end_z = max(connector_pose.position.z - 0.15, 0.005)
+        self.get_logger().info(
+            f"Stage 3: contact search z={start_z:.4f} → {end_z:.4f} "
+            f"(TCP at {tcp_z_now:.4f}, "
+            f"connector at z={connector_pose.position.z:.4f} "
+            f"XY=({connector_pose.position.x:.3f},{connector_pose.position.y:.3f}))"
+        )
+
         # Running-minimum local baseline: tracks cable-relaxation during descent.
         local_min_force = self.cable_force_baseline
 
@@ -1247,23 +1305,34 @@ class ANT(Policy):
         high_force_start = None
         high_force_budget_sec = 0.5
 
-        # Spiral lateral search: after 3 cm descent with no contact, step through
-        # XY offsets around the vision-estimated connector position.  Stage 1 vision
-        # grid search targets ±5 mm accuracy; the spiral samples a ±2 cm neighbourhood in
-        # 4 cardinal directions at 4 radii (5/10/15/20 mm) as a backstop.
+        # Spiral lateral search: once the arm is within 4 cm of connector_z, step
+        # through XY offsets around the estimated connector position.
         # When a contact candidate fires, the current offset is locked so all 3
         # consecutive-confirmation steps command the same XY — commanding center
         # on candidate 2/3 would break contact.
-        spiral_trigger_m = 0.030  # activate after 3 cm no-contact descent
+        #
+        # Bug 59 (Run 22): old trigger was start_z − 0.030 m (3 cm below approach).
+        # For SC (start_z ≈ 0.118 m, connector_z = 0.015 m), this fired at z ≈ 0.088 m —
+        # 7.4 cm above the port, leaving 37 steps of 2 mm before housing-contact depth
+        # (z ≈ 0.037 m).  With 1 spiral advance per step the spiral reached idx≈25
+        # (coarse ring, ±40–80 mm offsets) before the arm ever touched the housing.
+        # All contacts were housing-wall hits at large offsets; fine-ring probing (centre
+        # through ±20 mm) never happened at port depth.  Fix: trigger at connector_z+0.040,
+        # i.e. 40 mm above port.  From trigger to housing depth ≈ 2–3 steps → spiral
+        # stays at idx=0–2 (centre and ±5 mm), guaranteeing fine-ring probing at the
+        # depth where port detection matters.
+        spiral_z_threshold = connector_pose.position.z + 0.040
         spiral_offset_idx = 0
         locked_dx, locked_dy = 0.0, 0.0  # held while consecutive_contact > 0
         # Near-port spiral reset: set once when tcp_z first enters the near-port
-        # zone (tcp_z ≤ connector_z + 0.025).  By that depth the spiral may have
-        # advanced to coarse ±40–110 mm ring offsets — positioning the arm far
-        # from the port where the 1-of-1 near-port shortcut cannot help.  Resetting
-        # to idx=0 ensures fine-ring probing (center → ±5/10/15/20 mm) at the
-        # depth where accurate contact sensing is critical.
+        # zone (tcp_z ≤ connector_z + 0.025).  Resets to idx=0 so any remaining
+        # spiral advance since trigger does not leave the arm at a non-centre offset
+        # right when the 1-of-1 near-port shortcut is active.
         near_port_spiral_reset = False
+        # Fixed threshold for near-port 1-of-1 shortcut — lower than force_threshold
+        # because cable noise drops near connector_z (Run 16 T3: alternating 4.36 N
+        # readings at the SC port that never hit 3 consecutive above 5 N).
+        near_port_threshold = 4.0   # N
 
         current_z = start_z
         while current_z >= end_z:
@@ -1271,7 +1340,7 @@ class ANT(Policy):
                 raise TimeoutError("Timed out during contact detection")
 
             # Compute this step's XY offset.
-            spiral_active = (start_z - current_z) >= spiral_trigger_m
+            spiral_active = current_z <= spiral_z_threshold
             if consecutive_contact > 0:
                 dx, dy = locked_dx, locked_dy          # hold offset during confirmation
             elif spiral_active:
@@ -1292,6 +1361,10 @@ class ANT(Policy):
 
             self.sleep_for(0.05)
             obs = get_observation()
+            # Update step_m before the None guard so it is always current even
+            # when an observation is missed (prevents one extra coarse step on
+            # the iteration where current_z first crosses the fine-zone boundary).
+            step_m = step_fine_m if current_z <= fine_zone_top else step_coarse_m
             if obs is None:
                 current_z -= step_m
                 continue
@@ -1313,8 +1386,6 @@ class ANT(Policy):
                 f"local_min={local_min_force:.2f} N  local_delta={local_delta:.2f} N  Fz={fz:.2f} N"
             )
 
-            step_m = step_fine_m if current_z <= fine_zone_top else step_coarse_m
-
             # Near-port shortcut: within 25 mm of the port face, cable noise
             # drops and any reading ≥ 4.0 N is a reliable port-rim contact
             # signal.  Run 16 T3 showed alternating 4.36 N / 0.53 N / 4.44 N
@@ -1327,20 +1398,22 @@ class ANT(Policy):
             # a false near-port trigger and subsequent z-proximity guard reset.
             tcp_z = obs.controller_state.tcp_pose.position.z
             near_port = tcp_z <= connector_pose.position.z + 0.025
-            # Reset spiral to fine rings on first entry into near-port zone.
-            # Run 18 T3: spiral had advanced to coarse ±80 mm offsets by the time
-            # tcp_z reached connector_z; the 1-of-1 near-port shortcut was useless
-            # because the arm was never positioned over the port aperture.
+            # Reset spiral to centre on first entry into near-port zone.
+            # Bug 59 fix moves the spiral trigger to connector_z+0.040, so the arm
+            # should be in fine rings (idx≤8) by the time near-port fires.  Reset to
+            # idx=0 (centre) unconditionally (not just for coarse idx>16) so the
+            # arm probes the port centre first in the near-port window — the depth
+            # where the 1-of-1 shortcut is active.  Requires consecutive_contact==0
+            # to avoid interrupting an in-progress 2/3 or 3/3 confirmation.
             if near_port and not near_port_spiral_reset and consecutive_contact == 0:
                 near_port_spiral_reset = True
-                if spiral_offset_idx % len(self._SPIRAL_OFFSETS) > 16:
+                cur_idx = spiral_offset_idx % len(self._SPIRAL_OFFSETS)
+                if cur_idx > 0:
                     self.get_logger().info(
                         f"Stage 3: near-port — resetting spiral from "
-                        f"idx={spiral_offset_idx % len(self._SPIRAL_OFFSETS)} to 0 "
-                        f"(coarse ring at tcp_z={tcp_z:.4f})"
+                        f"idx={cur_idx} to 0 (centre) at tcp_z={tcp_z:.4f}"
                     )
                     spiral_offset_idx = 0
-            near_port_threshold = 4.0   # N — reliable port-rim signal near connector_z
             near_port_hit = near_port and local_delta > near_port_threshold
 
             if local_delta > self.force_threshold or near_port_hit:
@@ -1353,7 +1426,7 @@ class ANT(Policy):
                             f"Stage 3: spiral contact at offset "
                             f"({dx*1000:+.0f},{dy*1000:+.0f}) mm — locking XY"
                         )
-                if near_port_hit and local_delta <= self.force_threshold:
+                if near_port_hit:
                     # Jump straight to confirmed — 1-of-1 near port face.
                     consecutive_contact = required_consecutive
                     self.get_logger().info(
@@ -1486,6 +1559,12 @@ class ANT(Policy):
                                         tcp_pose=tcp,
                                     )
                             consecutive_contact = 0
+                            # Allow fine-ring reset on the next near-port entry
+                            # after detach — spiral may have advanced to coarse
+                            # offsets during the first descent, so re-enabling
+                            # the reset ensures the arm probes fine rings (center
+                            # → ±5–20 mm) again at the depth where it matters.
+                            near_port_spiral_reset = False
                             current_z = detach_z
                             continue
                         self.get_logger().info(
@@ -1578,39 +1657,52 @@ class ANT(Policy):
     def _compliant_insertion(
         self, contact_pose, get_observation, move_robot, send_feedback,
         start_time, time_limit_sec,
+        connector_z: float = None,
     ) -> bool:
-        """Incrementally descend 20 mm past the actual TCP contact position.
+        """Incrementally descend from the contact point to the connector face.
 
-        Uses 2 mm steps (same approach as Stage 3) rather than a single large
-        jump, allowing the cable tension to relax step-by-step as the arm
-        descends.  Starts from the ACTUAL TCP position at contact (not the
+        Uses 2 mm steps, allowing cable tension to relax step-by-step as the
+        arm descends.  Starts from the ACTUAL TCP position at contact (not the
         commanded pose) to avoid a large initial position error.
 
-        Uses approach_stiffness (85 N/m) to generate enough force to overcome
-        residual cable tension (~10 N) at contact depth.
+        End target: connector_z − 5 mm (5 mm past the port face), or 20 mm
+        below contact if connector_z is unknown (e.g. SC).
 
-        Hard force abort: stops immediately if |F| > 18 N for > 0.3 sim-s,
-        preventing the scoring penalty from sustained >20 N contact.
+        Run 20 showed that a fixed 20 mm stroke is insufficient — Stage 3 can
+        stall 5–10 cm above the port (cable tension), so Stage 4 must cover the
+        full remaining gap rather than only 20 mm from the stall point.
+
+        Hard force abort: stops if |F| > baseline+3 N for > 0.3 s, preventing
+        the scoring penalty from sustained >20 N contact.
         """
         send_feedback("Stage 4: compliant insertion")
 
-        # Stage 3 now returns the actual TCP pose at contact — use that XY/Z.
+        # Stage 3 returns the actual TCP pose at contact — use that XY/Z.
         start_x = contact_pose.position.x
         start_y = contact_pose.position.y
         start_z = contact_pose.position.z
 
-        # Descend 20 mm from contact in 2 mm steps (same ratchet that works in Stage 3).
+        # End target: 5 mm past port face when connector_z is known, else 20 mm
+        # past the stall/contact point as a conservative backstop.
         step_m = 0.002
-        end_z = max(start_z - 0.020, 0.005)
+        if connector_z is not None:
+            end_z = max(connector_z - 0.005, 0.005)
+        else:
+            end_z = max(start_z - 0.020, 0.005)
 
-        # Force abort tracking.  Same relative threshold as Stage 3 — see
-        # _force_abort_threshold property.
+        self.get_logger().info(
+            f"Stage 4: descending from z={start_z:.4f} to target z={end_z:.4f} "
+            f"({'connector_z-5mm' if connector_z is not None else 'contact-20mm'})"
+        )
+
+        # Force abort tracking.  Same relative threshold as Stage 3.
         high_force_start = None
         high_force_budget_sec = 0.3   # abort after 0.3 s above baseline+3 N
+        _converge_logged = False      # emit the "arm caught up" log only once
 
-        # Allow up to 50 s — Stage 4 IS converging (~13mm/15s from prior runs),
-        # it just needs more time to cover the remaining ~24mm to the threshold.
-        stage_timeout = Duration(seconds=50.0)
+        # Generous timeout: from stall at z≈0.23 to connector_z=0.134 is ~50 steps
+        # at 2mm each, ~120 sim-s worst case.
+        stage_timeout = Duration(seconds=120.0)
         stage_start = self.time_now()
 
         current_z = start_z
@@ -1636,8 +1728,10 @@ class ANT(Policy):
 
             force_abs = self._force_magnitude(obs)
             pos_error = np.linalg.norm(obs.controller_state.tcp_error[:3])
+            tcp_z = obs.controller_state.tcp_pose.position.z
             self.get_logger().info(
-                f"Stage 4: z={current_z:.4f} pos_error={pos_error:.4f} m  |F|={force_abs:.2f} N"
+                f"Stage 4: cmd_z={current_z:.4f} tcp_z={tcp_z:.4f} "
+                f"pos_error={pos_error:.4f} m  |F|={force_abs:.2f} N"
             )
 
             # Hard force abort: pressing against solid surface, not inserting.
@@ -1652,22 +1746,24 @@ class ANT(Policy):
                 send_feedback("Stage 4: force abort")
                 return False
 
-            # Success: arm settled within 10 mm of the insertion target, but only
-            # after at least 10 mm of stroke.  Guard prevents a false-settled exit
-            # on the first 2 mm step: at iter=1 the controller still carries the
-            # Stage 3 residual error (~0.047 m); at iter=2 it drops to ~0.001 m
-            # because the arm has only moved 2 mm — we must require genuine stroke
-            # before declaring insertion complete (Bug 50).
-            if pos_error < 0.010 and current_z <= start_z - 0.010:
-                self.get_logger().info("Stage 4: settled at insertion depth — complete.")
-                send_feedback("Stage 4: insertion complete")
-                return True
+            # Early-converge guard: arm has caught up to the commanded target.
+            # Don't exit — keep descending toward end_z so the plug reaches the
+            # port face.  Log once so we know the arm is tracking well without
+            # flooding the log on every subsequent converged iteration (Bug 50:
+            # minimum 10 mm stroke guard prevents a false trigger on iteration 1).
+            if pos_error < 0.010 and current_z <= start_z - 0.010 and not _converge_logged:
+                _converge_logged = True
+                self.get_logger().info(
+                    f"Stage 4: arm tracking target (pos_error<10mm) at "
+                    f"cmd_z={current_z:.4f} tcp_z={tcp_z:.4f} — continuing to end_z"
+                )
 
             current_z -= step_m
 
-        # Completed the full 20 mm stroke without force abort or convergence —
-        # declare success (we pushed as far as we can).
-        self.get_logger().info("Stage 4: full insertion stroke complete.")
+        # Completed the full stroke to connector_z − 5 mm without force abort.
+        self.get_logger().info(
+            f"Stage 4: full insertion stroke complete (reached z={end_z:.4f})."
+        )
         send_feedback("Stage 4: insertion complete")
         return True
 
@@ -1761,14 +1857,16 @@ class ANT(Policy):
                 connector_pose, get_observation, move_robot, send_feedback,
                 start_time, time_limit_sec,
             )
+            zone = "sfp" if task.plug_type == "sfp" else "sc"
             contact_pose = self._detect_contact(
                 connector_pose, get_observation, move_robot, send_feedback,
                 start_time, time_limit_sec,
-                zone="sfp" if task.plug_type == "sfp" else "sc",
+                zone=zone,
             )
             return self._compliant_insertion(
                 contact_pose, get_observation, move_robot, send_feedback,
                 start_time, time_limit_sec,
+                connector_z=self.connector_z_in_base[zone],
             )
 
         try:
@@ -1858,9 +1956,7 @@ class ANT(Policy):
             )
             try:
                 return_start = self.time_now()
-                self._run_joint_settle(
-                    6.0, move_robot, return_start, 8.0, raise_on_timeout=False,
-                )
+                self._run_joint_settle(6.0, move_robot, return_start, 8.0)
                 self.get_logger().info("ANT: pre-scout return complete")
             except Exception as e_home:
                 self.get_logger().warning(
