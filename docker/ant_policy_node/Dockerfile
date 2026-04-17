@@ -1,20 +1,26 @@
 FROM docker.io/library/ros:kilted-ros-core AS build
 
-# Install pixi
-RUN apt update && apt install -y git && curl -fsSL https://pixi.sh/install.sh | bash
+# Install pixi — no version pin needed; lock file is self-contained and
+# the docker-specific pixi.toml/pixi.lock live alongside this Dockerfile.
+RUN apt update && apt install -y git && \
+    curl -fsSL https://pixi.sh/install.sh | bash
 ENV PATH="/root/.pixi/bin:$PATH"
 
-# Add base dependencies (aic_model provides the Policy base class and ROS runner)
+# Add workspace source packages needed at inference time.
+# aic_utils (lerobot_robot_aic, aic_teleoperation) is intentionally excluded —
+# those packages caused ros2-distro-mutex/libprotobuf conflicts and are not
+# needed to run the ANT policy.
 COPY aic_example_policies /ws_aic/src/aic/aic_example_policies
 COPY aic_model /ws_aic/src/aic/aic_model
 COPY aic_interfaces /ws_aic/src/aic/aic_interfaces
-COPY aic_utils /ws_aic/src/aic/aic_utils
-
-# Add ANT policy package
 COPY ant_policy_node /ws_aic/src/aic/ant_policy_node
 
-COPY pixi.toml pixi.lock /ws_aic/src/aic/
-COPY pixi_env_setup.sh /ws_aic/src/aic/
+# Use the minimal Docker-specific pixi.toml/pixi.lock (next to this Dockerfile).
+# opencv is installed via pip (opencv-python-headless) to avoid the libprotobuf
+# conflict between opencv conda and ros2-distro-mutex 0.14.0.
+COPY docker/ant_policy_node/pixi.toml /ws_aic/src/aic/pixi.toml
+COPY docker/ant_policy_node/pixi.lock /ws_aic/src/aic/pixi.lock
+COPY pixi_env_setup.sh robostack_mapping.json /ws_aic/src/aic/
 
 SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
@@ -27,11 +33,17 @@ set -e
 
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
-if [[ -z "$AIC_ROUTER_ADDR" ]]; then
-  echo "AIC_ROUTER_ADDR must be provided"
+# Competition sets AIC_MODEL_ROUTER_ADDR; local docker-compose uses AIC_ROUTER_ADDR.
+ROUTER_ADDR="${AIC_MODEL_ROUTER_ADDR:-$AIC_ROUTER_ADDR}"
+if [[ -z "$ROUTER_ADDR" ]]; then
+  echo "Either AIC_MODEL_ROUTER_ADDR or AIC_ROUTER_ADDR must be provided"
   exit 1
 fi
 
+# Enable ACL only when AIC_ENABLE_ACL is explicitly set.
+# This must match the eval container's should_enable_acl() exactly — if only one
+# side configures usrpwd transport auth, Zenoh rejects the connection with
+# "UsrPwd extension - Recv InitSyn. Decoding error."
 should_enable_acl() {
   [[ "$AIC_ENABLE_ACL" == "true" || "$AIC_ENABLE_ACL" == "1" ]]
 }
@@ -45,8 +57,8 @@ if should_enable_acl; then
   echo "model:$AIC_MODEL_PASSWD" >> /credentials.txt
 fi
 
-# start the model
-ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/'"$AIC_ROUTER_ADDR"'"]'
+ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/'"$ROUTER_ADDR"'"]'
+ZENOH_CONFIG_OVERRIDE+=';listen/endpoints=["tcp/0.0.0.0:0"]'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="model"'
@@ -55,8 +67,13 @@ if should_enable_acl; then
 fi
 export ZENOH_CONFIG_OVERRIDE
 echo "ZENOH_CONFIG_OVERRIDE=$ZENOH_CONFIG_OVERRIDE"
+# Retry Zenoh router connection indefinitely — the competition evaluator and
+# model containers start in parallel; the router may not be reachable on the
+# first attempt.  Without this the default is 1 attempt, after which rmw_zenoh
+# proceeds without a router connection and the evaluator can never reach us.
+export ZENOH_ROUTER_CHECK_ATTEMPTS=-1
 exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["--ros-args", "-p", "policy:=ant_policy_node.ANT.ANT"]
+CMD ["--ros-args", "-p", "policy:=ant_policy_node.ANT"]

@@ -1,0 +1,25 @@
+[0.000000] (-) TimerEvent: {}
+[0.000234] (-) JobUnselected: {'identifier': 'aic_adapter'}
+[0.000281] (-) JobUnselected: {'identifier': 'aic_assets'}
+[0.000310] (-) JobUnselected: {'identifier': 'aic_control_interfaces'}
+[0.000341] (-) JobUnselected: {'identifier': 'aic_controller'}
+[0.000536] (-) JobUnselected: {'identifier': 'aic_description'}
+[0.000549] (-) JobUnselected: {'identifier': 'aic_engine'}
+[0.000571] (-) JobUnselected: {'identifier': 'aic_engine_interfaces'}
+[0.000594] (-) JobUnselected: {'identifier': 'aic_example_policies'}
+[0.000604] (-) JobUnselected: {'identifier': 'aic_gazebo'}
+[0.000614] (-) JobUnselected: {'identifier': 'aic_model'}
+[0.000625] (-) JobUnselected: {'identifier': 'aic_model_interfaces'}
+[0.000635] (-) JobUnselected: {'identifier': 'aic_mujoco'}
+[0.000645] (-) JobUnselected: {'identifier': 'aic_scoring'}
+[0.000655] (-) JobUnselected: {'identifier': 'aic_task'}
+[0.000666] (-) JobUnselected: {'identifier': 'aic_task_interfaces'}
+[0.000676] (-) JobUnselected: {'identifier': 'aic_teleoperation'}
+[0.000686] (-) JobUnselected: {'identifier': 'lerobot_robot_aic'}
+[0.000698] (aic_bringup) JobQueued: {'identifier': 'aic_bringup', 'dependencies': OrderedDict({'aic_assets': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_assets', 'aic_control_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_control_interfaces', 'aic_engine_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_engine_interfaces', 'aic_task_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_task_interfaces', 'aic_controller': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_controller', 'aic_gazebo': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_gazebo', 'aic_scoring': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_scoring', 'aic_description': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_description', 'aic_engine': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_engine'})}
+[0.000727] (ant_policy_node) JobQueued: {'identifier': 'ant_policy_node', 'dependencies': OrderedDict({'aic_control_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_control_interfaces', 'aic_task_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_task_interfaces', 'aic_model_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_model_interfaces', 'aic_model': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_model'})}
+[0.000747] (aic_bringup) JobStarted: {'identifier': 'aic_bringup'}
+[0.024675] (aic_bringup) JobEnded: {'identifier': 'aic_bringup', 'rc': 1}
+[0.025119] (ant_policy_node) JobStarted: {'identifier': 'ant_policy_node'}
+[0.030270] (ant_policy_node) JobEnded: {'identifier': 'ant_policy_node', 'rc': 'SIGINT'}
+[0.040504] (-) EventReactorShutdown: {}

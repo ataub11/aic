@@ -50,7 +50,7 @@ aic_controller:
       pose_error_integrator:
         gain: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         bound: [10., 10., 10., 2., 2., 2.]
-      maximum_wrench: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      maximum_wrench: [15.0, 15.0, 15.0, 15.0, 15.0, 15.0]
       nullspace:
         target_configuration: [0.6, -1.5708, -1.5708, -1.5708, 1.5708, 0.6]
         stiffness: [0., 0., 0., 0., 0., 0.]

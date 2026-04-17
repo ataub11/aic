@@ -1,0 +1,23 @@
+[0.000000] (-) TimerEvent: {}
+[0.000058] (-) JobUnselected: {'identifier': 'aic_adapter'}
+[0.000151] (-) JobUnselected: {'identifier': 'aic_assets'}
+[0.000182] (-) JobUnselected: {'identifier': 'aic_control_interfaces'}
+[0.000197] (-) JobUnselected: {'identifier': 'aic_controller'}
+[0.000209] (-) JobUnselected: {'identifier': 'aic_description'}
+[0.000221] (-) JobUnselected: {'identifier': 'aic_engine'}
+[0.000232] (-) JobUnselected: {'identifier': 'aic_engine_interfaces'}
+[0.000243] (-) JobUnselected: {'identifier': 'aic_example_policies'}
+[0.000254] (-) JobUnselected: {'identifier': 'aic_gazebo'}
+[0.000264] (-) JobUnselected: {'identifier': 'aic_model'}
+[0.000275] (-) JobUnselected: {'identifier': 'aic_model_interfaces'}
+[0.000286] (-) JobUnselected: {'identifier': 'aic_mujoco'}
+[0.000297] (-) JobUnselected: {'identifier': 'aic_scoring'}
+[0.000307] (-) JobUnselected: {'identifier': 'aic_task'}
+[0.000318] (-) JobUnselected: {'identifier': 'aic_task_interfaces'}
+[0.000329] (-) JobUnselected: {'identifier': 'aic_teleoperation'}
+[0.000339] (-) JobUnselected: {'identifier': 'ant_policy_node'}
+[0.000350] (-) JobUnselected: {'identifier': 'lerobot_robot_aic'}
+[0.000363] (aic_bringup) JobQueued: {'identifier': 'aic_bringup', 'dependencies': OrderedDict({'aic_assets': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_assets', 'aic_control_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_control_interfaces', 'aic_engine_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_engine_interfaces', 'aic_task_interfaces': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_task_interfaces', 'aic_controller': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_controller', 'aic_gazebo': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_gazebo', 'aic_scoring': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_scoring', 'aic_description': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_description', 'aic_engine': '/home/ataub/IndustryChallenge/ws_aic/src/aic/install/aic_engine'})}
+[0.000395] (aic_bringup) JobStarted: {'identifier': 'aic_bringup'}
+[0.015335] (aic_bringup) JobEnded: {'identifier': 'aic_bringup', 'rc': 1}
+[0.025619] (-) EventReactorShutdown: {}
