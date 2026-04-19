@@ -11,11 +11,11 @@ services:
     networks:
       - default
     environment:
-      AIC_EVAL_PASSWD: CHANGE_IN_PROD
-      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_EVAL_PASSWD: ${AIC_TEST_PASSWD:-aic_local_dev_2026}
+      AIC_MODEL_PASSWD: ${AIC_TEST_PASSWD:-aic_local_dev_2026}
       AIC_ENABLE_ACL: "true"
   model:
-    image: ant-policy:v7
+    image: ant-policy:v9
     build:
       dockerfile: docker/ant_policy_node/Dockerfile
       context: ..
@@ -26,7 +26,7 @@ services:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
       AIC_ROUTER_ADDR: eval:7447
-      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_PASSWD: ${AIC_TEST_PASSWD:-aic_local_dev_2026}
       AIC_ENABLE_ACL: "true"
 networks:
   default:
