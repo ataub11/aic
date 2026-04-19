@@ -29,7 +29,6 @@ from aic_model.policy import (
 from aic_task_interfaces.msg import Task
 from geometry_msgs.msg import Point, Pose, Vector3, Wrench
 from rclpy.duration import Duration
-from rclpy.time import Time
 from std_msgs.msg import Header
 
 
@@ -195,86 +194,7 @@ class ANT(Policy):
     # Back-projection lands 18–19 cm from zone centre, rejected by proximity filter;
     # calibrated zone fallback is always correct.  Net effect: 53 s wasted with no
     # localisation improvement.  Disabled until a stall-proof detection method exists.
-    _SC_PRESCAN_OFFSETS = ()      # disabled — see Bug 58
-    _SC_PRESCAN_Z_ABOVE = 0.18    # m above connector_z (retained for future re-enable)
-
-    # ======================================================================
-    # Vision localisation helpers
-    # ======================================================================
-
-    @staticmethod
-    def _tf_to_matrix(tf_stamped) -> np.ndarray:
-        """Convert a ROS TF stamped transform to a 4×4 homogeneous matrix.
-
-        The matrix maps points FROM the source frame TO the target frame,
-        matching the semantics of lookup_transform(target, source, ...).
-        """
-        t = tf_stamped.transform.translation
-        q = tf_stamped.transform.rotation
-        x, y, z, w = q.x, q.y, q.z, q.w
-        R = np.array([
-            [1 - 2*(y*y + z*z),     2*(x*y - w*z),     2*(x*z + w*y)],
-            [    2*(x*y + w*z), 1 - 2*(x*x + z*z),     2*(y*z - w*x)],
-            [    2*(x*z - w*y),     2*(y*z + w*x), 1 - 2*(x*x + y*y)],
-        ])
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [t.x, t.y, t.z]
-        return T
-
-    def _get_camera_in_base(self, camera_optical_frame: str):
-        """Look up the camera optical frame pose in base_link via TF.
-
-        Returns a 4×4 numpy array (base_T_camera_optical) suitable for
-        back-projection, or None if the transform is unavailable.
-        """
-        try:
-            tf = self._parent_node._tf_buffer.lookup_transform(
-                "base_link", camera_optical_frame, Time(),
-            )
-            return self._tf_to_matrix(tf)
-        except Exception as e:
-            self.get_logger().warning(
-                f"Stage 1 vision: TF lookup failed for {camera_optical_frame}: {e}"
-            )
-            return None
-
-    def _backproject_to_base_xy(self, u, v, camera_info, cam_in_base, connector_z):
-        """Back-project a pixel (u, v) to base_link XY at a known Z plane.
-
-        cam_in_base: 4×4 matrix returned by _get_camera_in_base — transforms
-                     points FROM camera_optical TO base_link.
-
-        The camera optical frame uses the ROS convention: Z=forward, X=right,
-        Y=down.  The ray from the camera through pixel (u,v) is parameterised
-        and intersected with the horizontal plane z=connector_z in base_link.
-
-        Returns (X, Y) in base_link, or None if degenerate (ray nearly
-        parallel to the plane, or the intersection is behind the camera).
-        """
-        K = np.array(camera_info.k).reshape(3, 3)
-        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-        if fx < 1.0:
-            return None   # uninitialised CameraInfo
-
-        # Normalised direction in camera optical frame
-        d_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0])
-
-        R = cam_in_base[:3, :3]   # camera orientation in base_link
-        O = cam_in_base[:3, 3]    # camera origin in base_link
-
-        d_base = R @ d_cam
-
-        # Intersect with z = connector_z plane in base_link
-        if abs(d_base[2]) < 1e-4:
-            return None   # ray nearly parallel to horizontal plane
-        t_ray = (connector_z - O[2]) / d_base[2]
-        if t_ray < 0:
-            return None   # intersection behind the camera
-
-        X = O[0] + t_ray * d_base[0]
-        Y = O[1] + t_ray * d_base[1]
-        return X, Y
+    _SC_PRESCAN_Z_ABOVE = 0.18    # m above connector_z — sets SC transit_z (Bug 58: prescan disabled)
 
     # ======================================================================
     # Motion helpers
@@ -497,6 +417,7 @@ class ANT(Policy):
         label: str = "move",
         check_force: bool = True,
         feedforward_fy: float = 0.0,
+        stiffness_xyz: float = None,
     ) -> None:
         """Send a Cartesian pose target and block until TCP converges or stalls.
 
@@ -531,8 +452,9 @@ class ANT(Policy):
                     f"{label}: did not converge within {stage_timeout_sec} s"
                 )
 
+            _stiffness = stiffness_xyz if stiffness_xyz is not None else self.approach_stiffness
             motion_update = self._build_motion_update(
-                target_pose, self.approach_stiffness, feedforward_fy)
+                target_pose, _stiffness, feedforward_fy)
             try:
                 move_robot(motion_update=motion_update)
             except Exception as ex:
@@ -787,9 +709,6 @@ class ANT(Policy):
             obs_wp1 = get_observation()
             orient = obs_wp1.controller_state.tcp_pose.orientation if obs_wp1 else current_orient
             # WP2: lateral at safe_z — well above all board faces.
-            # Bug 76/77 complement: SC cable still creates lateral equilibrium at
-            # safe_z=0.28 m (Run 33: stalled 11.25 cm short).  Apply same +6 N
-            # feedforward used in Stage 2 WP2 to shift equilibrium toward port.
             self.get_logger().info(
                 f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at safe_z={wp1_z:.3f}"
             )
@@ -841,111 +760,24 @@ class ANT(Policy):
             obs_wp2 = get_observation()
             orient = obs_wp2.controller_state.tcp_pose.orientation if obs_wp2 else current_orient
 
-        # ---- SC pre-scan: disabled (Bug 58) -----------------------------------
-        # Plug appears at image bottom (v≈779), outside any centre mask.  SC
-        # housing too large (436k px²) from stall positions 14–22 cm from targets.
-        # Falls directly to calibrated zone fallback.  To re-enable: populate
-        # _SC_PRESCAN_OFFSETS and restore a lateral-offset detector method.
+        # SC pre-scan disabled (Bug 58): plug appears at image bottom (v≈779), outside
+        # any centre mask; SC housing too large from stall positions 14–22 cm from targets.
+        # Falls directly to calibrated zone fallback — always the correct path for competition T3.
         self.get_logger().info(
-            "Stage 1 SC: prescan disabled (Bug 58) — using calibrated zone directly"
+            "Stage 1 SC: prescan disabled (Bug 58) — using calibrated zone fallback"
         )
-        estimates = []   # (X, Y) back-projected port estimates in base_link
-        pixels    = []   # (u, v) raw pixel detections, parallel to estimates
 
-        # ---- Aggregate: median filter + centroid ---------------------------
-        # Require only 1 estimate to proceed — a single high-score detection
-        # from a valid TF pose is useful data.
-
-        # Arm-fixed feature guard (Bug 55): reject detections of features that
-        # move with the arm (e.g. the SC cable plug hanging below the gripper).
-        # An arm-fixed feature always appears at nearly the same pixel regardless
-        # of where the arm moves — its world back-projection tracks the arm's XY,
-        # not the port's XY.  Run 20 T3: SC cable plug at pixel (575,767)±1px
-        # across all 13 grid positions; world estimates clustered at arm stall
-        # centroid Y=0.387, 4.25 cm from the actual port at Y=0.4295.
-        # The world-space std guard didn't fire because the arm DID reach slightly
-        # different stall positions (different pos_error per grid point), so
-        # world std > 1 cm.  But pixel std was < 2 px — definitive.
-        # Threshold: arm-fixed → std(u) < 5 px AND std(v) < 5 px.
-        # Port detection from different arm positions shifts pixels significantly
-        # (camera moves 40–90 mm between grid points → tens of pixels shift).
-        if len(pixels) >= 2:
-            us = np.array([p[0] for p in pixels])
-            vs = np.array([p[1] for p in pixels])
-            std_u = float(np.std(us))
-            std_v = float(np.std(vs))
-            if std_u < 5.0 and std_v < 5.0:
-                self.get_logger().warning(
-                    f"Stage 1 vision: arm-fixed feature detected "
-                    f"(pixel std_u={std_u:.1f} px, std_v={std_v:.1f} px < 5 px) "
-                    f"— {len(estimates)} estimates from feature moving with arm "
-                    "(e.g. cable plug below gripper) discarded → calibrated zone fallback"
-                )
-                estimates = []
-                pixels = []
-
-        # SC stall-collapse detection: SC cable tension can prevent the arm
-        # from reaching any grid position → all 13 grid images come from the
-        # same camera pose → all estimates are coincident → zero parallax →
-        # the centroid is meaningless clutter at an arbitrary location.
-        # Guard: if spread across all estimates is < 1 cm in both X and Y,
-        # the arm never moved → discard and fall through to calibrated zone.
-        if len(estimates) >= 2:
-            xs_all = np.array([e[0] for e in estimates])
-            ys_all = np.array([e[1] for e in estimates])
-            std_x = float(np.std(xs_all))
-            std_y = float(np.std(ys_all))
-            if std_x < 0.01 and std_y < 0.01:
-                self.get_logger().warning(
-                    f"Stage 1 vision: stall-collapse detected "
-                    f"(std_x={std_x*1000:.1f} mm, std_y={std_y*1000:.1f} mm) "
-                    f"— {len(estimates)} coincident estimates discarded "
-                    "→ calibrated zone fallback"
-                )
-                estimates = []
-
-        port_x, port_y = None, None
-        if len(estimates) == 1:
-            port_x, port_y = estimates[0]
-            self.get_logger().info(
-                f"Stage 1 vision: single estimate ({port_x:.3f},{port_y:.3f}) — "
-                "using directly (SC stall or single detection)"
-            )
-        elif len(estimates) >= 2:
-            xs = np.array([e[0] for e in estimates])
-            ys = np.array([e[1] for e in estimates])
-            med_x, med_y = float(np.median(xs)), float(np.median(ys))
-            dists = np.hypot(xs - med_x, ys - med_y)
-            inliers = [(x, y) for (x, y), d in zip(estimates, dists) if d <= 0.05]
-            if inliers:
-                port_x = sum(x for x, y in inliers) / len(inliers)
-                port_y = sum(y for x, y in inliers) / len(inliers)
-                self.get_logger().info(
-                    f"Stage 1 vision: port centre ({port_x:.3f},{port_y:.3f}) "
-                    f"from {len(inliers)}/{len(estimates)} inlier estimates"
-                )
-
+        # ---- Calibrated zone fallback: nearest known competition port ------
+        # Individual port positions are safe descent targets (avoids zone midpoint
+        # which clipped the NIC card enclosure in Run 16 T1: −24 contact penalty).
         obs_final = self._wait_for_observation(get_observation, start_time, time_limit_sec)
         orient_final = obs_final.controller_state.tcp_pose.orientation
-
-        if port_x is not None:
-            return self._make_pose(port_x, port_y, connector_z, orient_final)
-
-        # ---- Fallback: no valid estimate -----------------------------------
-        # Pick the known competition port nearest to the arm's current TCP
-        # position.  This avoids the zone midpoint (e.g. SFP Y=0.2326) which
-        # can clip the NIC card enclosure during descent (Run 16 T1: −24
-        # contact penalty).  The individual port positions are safe descent
-        # targets; Stage 3 descends directly from the chosen position.
-        # obs_final is guaranteed non-None (_wait_for_observation raises otherwise).
         arm_x = obs_final.controller_state.tcp_pose.position.x
         arm_y = obs_final.controller_state.tcp_pose.position.y
         known = self.zone_known_ports.get(zone, [(base_x, base_y)])
         fb_x, fb_y = min(known, key=lambda p: np.hypot(p[0] - arm_x, p[1] - arm_y))
-        self.get_logger().warning(
-            f"Stage 1 vision: no valid estimate "
-            f"({len(estimates)} raw detections, 0 accepted) — "
-            f"nearest known port ({fb_x:.4f},{fb_y:.4f}) — "
+        self.get_logger().info(
+            f"Stage 1 SC: nearest known port ({fb_x:.4f},{fb_y:.4f}) — "
             "Stage 3 will direct-descend from this position"
         )
         return self._make_pose(fb_x, fb_y, connector_z, orient_final)
@@ -965,13 +797,12 @@ class ANT(Policy):
         then correct XY to align with the detected connector.  This avoids
         combined diagonal moves that can produce awkward arm postures.
 
-        Bug 76: SC Stage 2 WP2 uses feedforward_fy=+6 N to break the cable
-        lateral equilibrium that stalls the arm 1–11 cm short of port XY at
-        approach_z=0.1145 m.  The feedforward is applied only during WP2 and
-        zeroed for all subsequent stages.
+        Bug 84 (REVERTED — Bug 88): 200 N/m for SC WP2 caused snap-through at 3.78 cm
+        to 5.60 cm, equilibrating at 4.83 cm — worse than the natural 85 N/m stall at
+        ~3.7 cm.  SC WP2 now uses approach_stiffness (85 N/m) like all other stages.
         """
         send_feedback("Stage 2: approaching connector")
-        approach_z = connector_pose.position.z + 0.10
+        approach_z = connector_pose.position.z + (0.07 if zone == "sc" else 0.10)
 
         obs = get_observation()
         if obs is not None:
@@ -995,7 +826,6 @@ class ANT(Policy):
         )
 
         # Leg 2: correct XY to align with the detected connector.
-        wp2_feedforward_fy = 0.0
         self._move_to_pose_and_wait(
             self._make_pose(
                 connector_pose.position.x,
@@ -1006,7 +836,6 @@ class ANT(Policy):
             move_robot, get_observation, start_time, time_limit_sec,
             convergence_m=0.015, stage_timeout_sec=30.0, label="Stage 2 WP2 XY-align",
             check_force=False,
-            feedforward_fy=wp2_feedforward_fy,
         )
         send_feedback("Stage 2: at approach waypoint")
 
@@ -1549,7 +1378,12 @@ class ANT(Policy):
         # A −3 N Z feedforward adds 3 N downward outside the max_wrench cap,
         # shifting the equilibrium ~2 cm lower and allowing creep toward the port.
         # SC uses 0: cable tension there is already overcome by slower creep at 85 N/m.
-        stage4_feedforward_fz = -3.0 if zone != "sc" else 0.0
+        if zone == "sc":
+            stage4_feedforward_fz = 0.0
+        elif self._insert_call_count == 2:   # T2: SFP at -45° yaw, higher cable tension
+            stage4_feedforward_fz = -9.0
+        else:
+            stage4_feedforward_fz = -3.0
 
         self.get_logger().info(
             f"Stage 4: holding cmd_z={end_z:.4f} (connector_z-5mm), "
@@ -1562,7 +1396,6 @@ class ANT(Policy):
         # Force abort tracking.  Same relative threshold as Stage 3.
         high_force_start = None
         high_force_budget_sec = 0.3   # abort after 0.3 s above baseline+3 N
-        _converge_logged = False
 
         stage_timeout = Duration(seconds=120.0)
         stage_start = self.time_now()
@@ -1614,8 +1447,7 @@ class ANT(Policy):
                 return False
 
             # Early exit: arm has reached insertion depth.
-            if tcp_z <= end_z + 0.005 and not _converge_logged:
-                _converge_logged = True
+            if tcp_z <= end_z + 0.005:
                 self.get_logger().info(
                     f"Stage 4: arm reached insertion depth tcp_z={tcp_z:.4f} "
                     f"(target={end_z:.4f}) — insertion complete"

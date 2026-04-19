@@ -192,7 +192,7 @@ def postprocess_world_xml(xml_str):
         '    <weld body1="ati/tool_link" body2="lc_plug_link"'
         ' relpose="-0.000711 0.001759 0.168213'
         ' 0.577301 0.816105 -0.021418 -0.015395"'
-        ' solref="0.002 1" solimp="0.99 0.999 0.001"/>\n'
+        ' solref="0.005 1" solimp="0.9 0.95 0.01"/>\n'
         "  </equality>\n"
     )
     xml_str = xml_str.replace("</mujoco>", weld_section + "</mujoco>")
