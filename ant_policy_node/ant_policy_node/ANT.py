@@ -16,6 +16,7 @@ All parameters marked CALIBRATE must be tuned once from a run with
 """
 
 import collections
+import math
 import cv2
 import numpy as np
 
@@ -27,7 +28,7 @@ from aic_model.policy import (
     SendFeedbackCallback,
 )
 from aic_task_interfaces.msg import Task
-from geometry_msgs.msg import Point, Pose, Vector3, Wrench
+from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from rclpy.duration import Duration
 from std_msgs.msg import Header
 
@@ -140,6 +141,23 @@ class ANT(Policy):
         # trial 2 = T2 (Y=0.2526, requires safe high-Z approach over NIC mount).
         self._insert_call_count = 0
 
+        # ---- Stage 4 admittance mode ---------------------------------------
+        # When True, Stage 4 regulates cmd_z to maintain a target contact force
+        # above the cable baseline rather than relying on an impedance spring
+        # whose authority is capped by maximum_wrench.  Removes the need for
+        # the feedforward_fz escalation chain (Bug 83: -3N → -6N → -9N) because
+        # the admittance loop naturally pushes harder when under-force and
+        # backs off on hard contact.  See _admittance_insertion().
+        # On rigid-axial-constraint sim (MuJoCo cable plugin, Bug 86) admittance
+        # and impedance are equivalent — both freeze because the constraint is
+        # non-negotiable.  Real hardware has genuine axial compliance so the
+        # force-regulated loop actually advances cmd_z.
+        self.use_admittance_stage4 = True
+        self.admittance_target_force_n = 18.0   # N of contact force (SFP T1/T2 real-hardware descend at 18 N ECR v10)
+        self.admittance_sc_target_force_n = 8.0  # SC: softer to avoid overshoot past viable zone (Bug 74)
+        self.admittance_max_step_m = 0.002       # per-iteration cmd_z adjustment cap
+        self.admittance_k_gain = 0.00015         # m per N of error — tuned so a 10 N deficit gives 1.5 mm step
+
     # Workspace bounds for probe-point validation in base_link (m).
     # NOTE: base_link X = −world_X, Y = −world_Y (180° yaw from tabletop TF).
     # X range: [-0.586, -0.361] across training scenarios, ±0.15 m margin
@@ -206,6 +224,24 @@ class ANT(Policy):
             position=Point(x=float(x), y=float(y), z=float(z)),
             orientation=orientation,
         )
+
+    @staticmethod
+    def _rotate_about_tool_z(orientation: Quaternion, angle_rad: float) -> Quaternion:
+        """Return orientation rotated by angle_rad about the TCP's local Z axis.
+
+        Post-multiplication (q_tcp * q_local_z) rotates about the moving
+        frame's Z — i.e. wrist_3 on the UR5e — which is what we want for
+        SC cable unwinding without tilting the plug away from the board.
+        """
+        ox, oy, oz, ow = orientation.x, orientation.y, orientation.z, orientation.w
+        c = math.cos(angle_rad / 2.0)
+        s = math.sin(angle_rad / 2.0)
+        # q_result = q_tcp * (c + s·z_hat)
+        qx = ox * c + oy * s
+        qy = oy * c - ox * s
+        qz = oz * c + ow * s
+        qw = ow * c - oz * s
+        return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
     def _in_workspace_xy(self, x: float, y: float) -> bool:
         """Return True if (x, y) lies within the configured workspace XY bounds."""
@@ -786,6 +822,82 @@ class ANT(Policy):
     # Stage 2 — Approach the connector
     # ======================================================================
 
+    def _sc_wrist_unwind(
+        self, hold_xy, hold_z, base_orientation,
+        get_observation, move_robot,
+        start_time, time_limit_sec,
+    ) -> Quaternion:
+        """Pick the wrist_3 rotation that best relaxes lateral cable tension.
+
+        Rationale (Bug 66): SC Stage 2 WP2 stalls 1–11 cm from the SC port
+        because lateral cable force balances the impedance spring at
+        approach_z.  All prior attempts (feedforward_fy Bugs 76/80/82,
+        overshoot Bugs 77/81, stiffer WP2 Bug 84) either caused snap-through
+        or shifted the equilibrium further from the port — they all command a
+        new TCP target against the same cable-geometry wall.
+
+        Wrist rotation is orthogonal: rotating wrist_3 changes where the
+        cable *exits* the gripper relative to the arm's base bracket, which
+        reparameterises the cable geometry rather than fighting it.  We pick
+        the direction that reduces wrist-sensed horizontal force (the signed
+        in-plane component of the cable pull).
+
+        Returns the orientation after the best rotation; call site should use
+        it for the subsequent WP2 XY-align.
+        """
+        def _xy_force_mag(obs):
+            if obs is None:
+                return None
+            f = obs.wrist_wrench.wrench.force
+            return (f.x ** 2 + f.y ** 2) ** 0.5
+
+        # Small rotations: ±30° about tool Z.  Larger angles risk
+        # exceeding wrist_3 joint limits or dragging the cable over
+        # sharp geometry; small ones still meaningfully change the
+        # cable exit pose on a ~10 cm loop near the gripper.
+        candidates = [0.0, math.radians(30.0), math.radians(-30.0)]
+
+        obs_initial = get_observation()
+        baseline_force = _xy_force_mag(obs_initial)
+        if baseline_force is None:
+            self.get_logger().warning(
+                "Stage 2 SC wrist unwind: no observation — skipping"
+            )
+            return base_orientation
+
+        results = []   # list of (angle_rad, xy_force)
+        for angle in candidates:
+            rotated = self._rotate_about_tool_z(base_orientation, angle)
+            try:
+                self._move_to_pose_and_wait(
+                    self._make_pose(hold_xy[0], hold_xy[1], hold_z, rotated),
+                    move_robot, get_observation, start_time, time_limit_sec,
+                    convergence_m=0.02, stage_timeout_sec=6.0,
+                    label=f"Stage 2 SC wrist unwind {math.degrees(angle):+.0f}°",
+                    check_force=False,
+                )
+            except (TimeoutError, OutOfReachError):
+                continue
+            obs = get_observation()
+            f_xy = _xy_force_mag(obs)
+            if f_xy is not None:
+                results.append((angle, rotated, f_xy))
+
+        if not results:
+            return base_orientation
+
+        # Pick the rotation with lowest lateral force — that's the cable
+        # pulling least sideways on the wrist, i.e. the geometry most
+        # favourable for subsequent WP2 XY-align.
+        best_angle, best_orient, best_f = min(results, key=lambda r: r[2])
+        self.get_logger().info(
+            f"Stage 2 SC wrist unwind: best angle={math.degrees(best_angle):+.0f}° "
+            f"|F_xy|={best_f:.2f} N (baseline {baseline_force:.2f} N, "
+            f"tested {len(results)}/{len(candidates)})"
+        )
+        # If 0° was best, hold the original orientation.
+        return best_orient if abs(best_angle) > 1e-6 else base_orientation
+
     def _approach_connector(
         self, connector_pose, get_observation, move_robot, send_feedback,
         start_time, time_limit_sec,
@@ -796,6 +908,13 @@ class ANT(Policy):
         Uses a two-leg path: descend Z at the current (scouting) XY first,
         then correct XY to align with the detected connector.  This avoids
         combined diagonal moves that can produce awkward arm postures.
+
+        For SC, a wrist_3 unwind between the legs (Bug 66 fix attempt)
+        chooses a ±30° rotation that minimises lateral cable force before
+        WP2 XY-align.  Prior approaches (feedforward_fy, overshoot, stiffer
+        WP2) all commanded new targets against the cable-geometry wall; the
+        unwind instead reparameterises the cable exit pose and lets WP2
+        converge closer to the port.
 
         Bug 84 (REVERTED — Bug 88): 200 N/m for SC WP2 caused snap-through at 3.78 cm
         to 5.60 cm, equilibrating at 4.83 cm — worse than the natural 85 N/m stall at
@@ -825,13 +944,29 @@ class ANT(Policy):
             check_force=False,
         )
 
+        # SC-only: pick the wrist_3 angle that minimises lateral cable force
+        # before attempting WP2 XY-align (Bug 66 attempt).  SFP cable tension
+        # equilibrium is not the T1/T2 bottleneck (sim stalls are axial,
+        # Bug 86) so SFP keeps the original orientation.
+        wp2_orientation = connector_pose.orientation
+        if zone == "sc":
+            obs_after_wp1 = get_observation()
+            if obs_after_wp1 is not None:
+                hold_x = obs_after_wp1.controller_state.tcp_pose.position.x
+                hold_y = obs_after_wp1.controller_state.tcp_pose.position.y
+                hold_z = obs_after_wp1.controller_state.tcp_pose.position.z
+                wp2_orientation = self._sc_wrist_unwind(
+                    (hold_x, hold_y), hold_z, connector_pose.orientation,
+                    get_observation, move_robot, start_time, time_limit_sec,
+                )
+
         # Leg 2: correct XY to align with the detected connector.
         self._move_to_pose_and_wait(
             self._make_pose(
                 connector_pose.position.x,
                 connector_pose.position.y,
                 approach_z,
-                connector_pose.orientation,
+                wp2_orientation,
             ),
             move_robot, get_observation, start_time, time_limit_sec,
             convergence_m=0.015, stage_timeout_sec=30.0, label="Stage 2 WP2 XY-align",
@@ -1326,7 +1461,155 @@ class ANT(Policy):
         zone: str = "sfp",
         connector_pose=None,
     ) -> bool:
-        """Compliant insertion: hold arm at connector_z − 5 mm for up to 120 s.
+        """Dispatch to admittance or impedance Stage 4 based on config flag."""
+        if self.use_admittance_stage4:
+            return self._admittance_insertion(
+                contact_pose, get_observation, move_robot, send_feedback,
+                start_time, time_limit_sec,
+                connector_z=connector_z, zone=zone, connector_pose=connector_pose,
+            )
+        return self._impedance_insertion(
+            contact_pose, get_observation, move_robot, send_feedback,
+            start_time, time_limit_sec,
+            connector_z=connector_z, zone=zone, connector_pose=connector_pose,
+        )
+
+    def _admittance_insertion(
+        self, contact_pose, get_observation, move_robot, send_feedback,
+        start_time, time_limit_sec,
+        connector_z: float = None,
+        zone: str = "sfp",
+        connector_pose=None,
+    ) -> bool:
+        """Force-regulated descent: maintain a target contact force until insertion.
+
+        Replaces the impedance + feedforward_fz escalation hack.  Loop:
+          measured_contact = |F| − cable_baseline
+          err              = target_force − measured_contact  (positive = under force)
+          Δz               = clip(k · err, −max_step, +max_step)
+          cmd_z            = clip(cmd_z − Δz, end_z, start_z)
+
+        When under-force (err > 0) cmd_z descends further, raising the impedance
+        spring force.  When over-force (err < 0) cmd_z backs off, reducing
+        contact pressure.  Zone-specific target (SFP 18 N, SC 8 N) replaces the
+        feedforward_fz chain (Bug 83).  Hard force-abort threshold still fires
+        for solid-surface pressing.
+        """
+        send_feedback("Stage 4: admittance insertion")
+
+        stiffness = self.approach_stiffness if zone == "sc" else self.insertion_stiffness
+        target_force = (
+            self.admittance_sc_target_force_n if zone == "sc"
+            else self.admittance_target_force_n
+        )
+
+        start_x = contact_pose.position.x
+        start_y = contact_pose.position.y
+        start_z = contact_pose.position.z
+
+        # Bug 79: abort if arm landed far from port in XY.
+        if connector_pose is not None:
+            xy_err = np.linalg.norm([
+                start_x - connector_pose.position.x,
+                start_y - connector_pose.position.y,
+            ])
+            if xy_err > 0.15:
+                self.get_logger().warning(
+                    f"Stage 4 (admittance): arm {xy_err:.3f}m from port XY — aborting"
+                )
+                return False
+
+        if connector_z is not None:
+            end_z = max(connector_z - 0.005, 0.005)
+        else:
+            end_z = max(start_z - 0.020, 0.005)
+
+        cmd_z = start_z   # begin at contact depth; admittance ramps descent
+        tcp_z = start_z
+
+        self.get_logger().info(
+            f"Stage 4 (admittance): start_z={start_z:.4f} end_z={end_z:.4f} "
+            f"target_F={target_force:.1f}N cable_baseline={self.cable_force_baseline:.1f}N "
+            f"stiffness={stiffness:.0f} N/m"
+        )
+
+        high_force_start = None
+        high_force_budget_sec = 0.3
+        hard_abort_force = self.cable_force_baseline + 25.0  # N absolute — solid surface
+        stage_timeout = Duration(seconds=120.0)
+        stage_start = self.time_now()
+
+        while True:
+            if self._is_timed_out(start_time, time_limit_sec):
+                raise TimeoutError("Timed out during admittance insertion")
+            if (self.time_now() - stage_start) >= stage_timeout:
+                self.get_logger().info(
+                    f"Stage 4 (admittance): 120s hold complete — tcp_z={tcp_z:.4f}"
+                )
+                break
+
+            target_pose = self._make_pose(start_x, start_y, cmd_z, contact_pose.orientation)
+            motion_update = self._build_motion_update(target_pose, stiffness)
+            try:
+                move_robot(motion_update=motion_update)
+            except Exception as ex:
+                raise RuntimeError(f"Stage 4 (admittance): move_robot failed: {ex}")
+
+            self.sleep_for(0.05)
+            obs = get_observation()
+            if obs is None:
+                continue
+
+            force_abs = self._force_magnitude(obs)
+            tcp_z = obs.controller_state.tcp_pose.position.z
+            contact_delta = force_abs - self.cable_force_baseline
+
+            # Hard force abort on solid surface.
+            timed_out, high_force_start = self._high_force_timed_out(
+                force_abs, hard_abort_force, high_force_start, high_force_budget_sec,
+            )
+            if timed_out:
+                self.get_logger().warning(
+                    f"Stage 4 (admittance): force abort — {force_abs:.1f} N "
+                    f"(>{hard_abort_force:.1f} N solid surface) sustained > "
+                    f"{high_force_budget_sec}s"
+                )
+                send_feedback("Stage 4: force abort")
+                return False
+
+            # Admittance update.  err > 0 when under target force → descend further.
+            err = target_force - contact_delta
+            dz = self.admittance_k_gain * err
+            dz = max(-self.admittance_max_step_m, min(self.admittance_max_step_m, dz))
+            cmd_z = max(end_z, min(start_z, cmd_z - dz))
+
+            self.get_logger().info(
+                f"Stage 4 (admittance): cmd_z={cmd_z:.4f} tcp_z={tcp_z:.4f} "
+                f"|F|={force_abs:.2f}N Δ={contact_delta:+.2f}N "
+                f"err={err:+.2f}N dz={dz*1000:+.2f}mm"
+            )
+
+            if tcp_z <= end_z + 0.005:
+                self.get_logger().info(
+                    f"Stage 4 (admittance): arm reached insertion depth "
+                    f"tcp_z={tcp_z:.4f} (target={end_z:.4f})"
+                )
+                break
+
+        self.get_logger().info(
+            f"Stage 4 (admittance): complete — tcp_z={tcp_z:.4f}, target={end_z:.4f}."
+        )
+        send_feedback("Stage 4: insertion complete")
+        return True
+
+    def _impedance_insertion(
+        self, contact_pose, get_observation, move_robot, send_feedback,
+        start_time, time_limit_sec,
+        connector_z: float = None,
+        zone: str = "sfp",
+        connector_pose=None,
+    ) -> bool:
+        """Impedance + feedforward Stage 4 (legacy path, retained as fallback).
 
         Bug 67: immediately command end_z = connector_z − 5 mm for max spring
         force from t=0.  All non-force-abort exits return True so scoring
