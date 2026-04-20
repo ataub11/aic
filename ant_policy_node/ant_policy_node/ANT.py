@@ -772,23 +772,14 @@ class ANT(Policy):
             obs_wp1 = get_observation()
             orient = obs_wp1.controller_state.tcp_pose.orientation if obs_wp1 else current_orient
             # WP2: lateral at safe_z — well above all board faces.
-            # SC stiffness bumped from 85 → 140 N/m to push through the cable
-            # equilibrium that stalls this move 3-11 cm short of the SC port
-            # (Bug 66).  Submission 231 T3 ended 0.22 m from port with no
-            # contact — arm never reached the SC zone.  140 N/m stays below
-            # the 200 N/m that caused snap-through overshoot (Bug 84).  Still
-            # capped by max_wrench so force penalty remains impossible.
-            sc_wp2_stiffness = 140.0 if zone == "sc" else None
             self.get_logger().info(
                 f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at safe_z={wp1_z:.3f}"
-                + (f" [stiffness={sc_wp2_stiffness:.0f}]" if sc_wp2_stiffness else "")
             )
             self._move_to_pose_and_wait(
                 self._make_pose(base_x, base_y, wp1_z, orient),
                 move_robot, get_observation, start_time, time_limit_sec,
                 convergence_m=0.015, stage_timeout_sec=30.0,
                 label="Stage 1 WP2 lateral (safe-Z)", check_force=False,
-                stiffness_xyz=sc_wp2_stiffness,
             )
             obs_wp2 = get_observation()
             orient = obs_wp2.controller_state.tcp_pose.orientation if obs_wp2 else orient
@@ -1777,34 +1768,5 @@ class ANT(Policy):
             "ANT: skipping joint return — arm stays at Stage 4 depth to preserve "
             "tier_3 score (Bugs 52 + 61)"
         )
-
-        # T2-exit lift: ascend 6 cm in Z only (no lateral, no joint move) after
-        # T2 completes.  T2 has consistently scored tier_3=0 on real hardware
-        # (plug ends ~0.17 m from port, outside the bounding radius), so a
-        # small lift costs 0 tier_3 points on T2 but leaves T3 with much
-        # lower starting cable tension — T3 submission 231 ended 0.22 m from
-        # its port because the Stage 1 lateral stalled under SFP-pose cable
-        # load.  Skip on T1 (tier_3>0, lift would lose all of it) and on T3
-        # (no subsequent trial).  Force-aware: abort the lift if force spikes.
-        if self._insert_call_count == 2:
-            try:
-                obs_t2 = get_observation()
-                if obs_t2 is not None:
-                    tcp = obs_t2.controller_state.tcp_pose
-                    lift_z = min(tcp.position.z + 0.06, 0.28)
-                    self.get_logger().info(
-                        f"ANT: T2-exit lift from z={tcp.position.z:.3f} to z={lift_z:.3f} "
-                        "(prep for T3 Stage 1)"
-                    )
-                    self._move_to_pose_and_wait(
-                        self._make_pose(tcp.position.x, tcp.position.y, lift_z, tcp.orientation),
-                        move_robot, get_observation, start_time, time_limit_sec,
-                        convergence_m=0.02, stage_timeout_sec=8.0,
-                        label="T2-exit lift", check_force=False,
-                    )
-            except (OutOfReachError, TimeoutError, UnexpectedContactError) as e:
-                # Don't fail the trial over a prep lift — scoring has already
-                # captured the T2 plug-port distance by this point.
-                self.get_logger().warning(f"ANT: T2-exit lift did not complete — {e}")
 
         return success
