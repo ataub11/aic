@@ -243,7 +243,9 @@ class ANT(Policy):
                 return False, self.time_now()
             elapsed = (self.time_now() - high_force_start).nanoseconds / 1e9
             return elapsed > budget_sec, high_force_start
-        return False, high_force_start
+        # Reset timer when force drops — measure continuously sustained force,
+        # not cumulative. Cable oscillations no longer accumulate abort budget.
+        return False, None
 
     def _run_joint_settle(
         self, duration_sec: float, move_robot, start_time, time_limit_sec,
@@ -1404,11 +1406,12 @@ class ANT(Policy):
 
         # SFP: spring force (200 N/m) is capped at max_wrench=15 N, which exactly
         # balances the SFP cable upward equilibrium force at ~0.18–0.23 m.
-        # A −3 N Z feedforward adds 3 N downward outside the max_wrench cap,
-        # shifting the equilibrium ~2 cm lower and allowing creep toward the port.
-        # SC uses 0: cable tension there is already overcome by slower creep at 85 N/m.
+        # A feedforward adds constant downward force outside the max_wrench cap.
+        # SC: at stall the 85 N/m spring (~7.6 N) ≈ cable tension → no net descent.
+        # A −5 N feedforward breaks the equilibrium and drives slow controlled descent
+        # toward tcp_z ≈ 0.04–0.06 m for tier_3 credit (was 0 → arm stalled at 0.10 m).
         if zone == "sc":
-            stage4_feedforward_fz = 0.0
+            stage4_feedforward_fz = -5.0
         elif self._insert_call_count == 2:   # T2: SFP at -45° yaw, higher cable tension
             stage4_feedforward_fz = -9.0
         else:
@@ -1424,7 +1427,10 @@ class ANT(Policy):
 
         # Force abort tracking.  Same relative threshold as Stage 3.
         high_force_start = None
-        high_force_budget_sec = 0.3   # abort after 0.3 s above baseline+3 N
+        # SC cable tension varies more during descent; give 0.5 s before aborting
+        # so brief contact spikes don't abort a valid insertion attempt.
+        # SFP keeps 0.3 s — it's already working well and needs a tighter guard.
+        high_force_budget_sec = 0.5 if zone == "sc" else 0.3
 
         stage_timeout = Duration(seconds=120.0)
         stage_start = self.time_now()
