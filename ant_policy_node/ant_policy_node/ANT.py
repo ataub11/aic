@@ -1398,15 +1398,15 @@ class ANT(Policy):
         # balances the SFP cable upward equilibrium force at ~0.18–0.23 m.
         # A feedforward adds constant downward force outside the max_wrench cap.
         # SC: at stall the 85 N/m spring (~7.6 N) ≈ cable tension → no net descent.
-        # ECR v11 used −5 N (T3=1.0, force abort 42.5 N at z≈0.097 — never reached
-        # viable depth).  Bump to −7 N for v15: total ≈14.4 N down vs ~7.7 N cable
-        # tension → ~6.7 N net descent force (was 4.7 N, +40 %).  Stays well below
-        # the SFP T1 18 N total that was confirmed safe on real hardware (ECR v10),
-        # and below the ~25 N force-abort threshold (baseline≈22 N + 3 N).  The
-        # Bug 90 timer-reset on force drop continues to absorb cable oscillation
-        # transients within the 0.5 s SC budget.
+        # A −5 N feedforward breaks the equilibrium and drives slow controlled descent
+        # toward tcp_z ≈ 0.04–0.06 m for tier_3 credit.
+        # Bug 91 (REVERTED post v15-sim): tried −7 N to push harder; sim T3 hit
+        # peak 74.89 N for 0.62 s — well above the 25 N abort threshold and
+        # dangerously close to the 1.0 s force-penalty threshold (−12). Reverting
+        # to −5 N keeps SC peak force under ~45 N (v11 measured 42.5 N) with no
+        # change in T3 outcome (force-abort fires either way until Bug 66 is fixed).
         if zone == "sc":
-            stage4_feedforward_fz = -7.0
+            stage4_feedforward_fz = -5.0
         elif self._insert_call_count == 2:   # T2: SFP at -45° yaw, higher cable tension
             stage4_feedforward_fz = -9.0
         else:
