@@ -618,48 +618,38 @@ class ANT(Policy):
                     )
                     obs_wp = get_observation()
                     orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
-                # Bug 89: split lateral into 2 sub-moves via midpoint Y waypoint.
-                # Run 40 T2 in sim: pos_error spiked 0.041→0.071 m at iter=3 of the
-                # single-move WP2, producing a 200.53 N transient (0.02 s) — the
-                # highest ever recorded (Run 32 had 148 N).  At safe_z=0.28 m the
-                # SFP cable at -45° yaw is strongly pretensioned; a single 5-6 cm
-                # lateral command stretches the cable past an unstable constraint
-                # point and triggers snap-through.  Splitting into halves lowers
-                # peak deflection per move, letting the cable re-equilibrate at
-                # the midpoint before the second half — same strategy that kept
-                # WP1 safe ascent from spiking (small Z step).  Keeps sub-second
-                # transient well below the 1 s penalty threshold even if real
-                # hardware cable dynamics differ from sim.
+                # Bug 89 → Bug 92 upgrade: 2-way split → 3-way split lateral approach.
+                # Bug 89 (2-way, 20 s/step) worked in v11 (T2=37.23) but failed in
+                # v14 under a higher-tension cable day — arm missed the T2 bounding
+                # radius entirely.  Root cause: 2.63 cm half-steps still trigger
+                # snap-through when pretension is elevated; the arm snaps backward past
+                # its starting Y and the second half-move must cover more distance than
+                # originally planned.  3-way split (1/3, 2/3, 1.0 of total Y delta)
+                # reduces each increment to ~1.75 cm.  Timeouts extended 20→30 s/step
+                # (still well within trial budget) for more cable-creep settling time.
+                # Y fractions are computed once from the arm's actual position at the
+                # start of each step so cable snap-through in one step doesn't compound
+                # into subsequent steps.
                 obs_wp = get_observation()
                 y_now = obs_wp.controller_state.tcp_pose.position.y if obs_wp else current_y
-                mid_y = 0.5 * (y_now + tgt_y)
-                self.get_logger().info(
-                    f"Stage 1 SFP T2: WP2a lateral midpoint → ({tgt_x:.4f},{mid_y:.4f}) "
-                    f"at safe_z={safe_z:.3f} (split move, Bug 89)"
-                )
-                self._move_to_pose_and_wait(
-                    self._make_pose(tgt_x, mid_y, safe_z, orient),
-                    move_robot, get_observation, start_time, time_limit_sec,
-                    convergence_m=0.015, stage_timeout_sec=20.0,
-                    label="Stage 1 SFP T2 WP2a lateral midpoint (high-Z)",
-                    check_force=False,
-                )
-                obs_wp = get_observation()
-                orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
-                self.get_logger().info(
-                    f"Stage 1 SFP T2: WP2b lateral to T2 port ({tgt_x:.4f},{tgt_y:.4f}) "
-                    f"at safe_z={safe_z:.3f}"
-                )
-                self._move_to_pose_and_wait(
-                    self._make_pose(tgt_x, tgt_y, safe_z, orient),
-                    move_robot, get_observation, start_time, time_limit_sec,
-                    convergence_m=0.015, stage_timeout_sec=20.0,
-                    label="Stage 1 SFP T2 WP2b lateral final (high-Z)",
-                    check_force=False,
-                )
+                y_delta = tgt_y - y_now
+                for step_idx, fraction in enumerate((1/3, 2/3, 1.0), start=1):
+                    step_y = y_now + y_delta * fraction
+                    self.get_logger().info(
+                        f"Stage 1 SFP T2: WP2 step {step_idx}/3 → "
+                        f"({tgt_x:.4f},{step_y:.4f}) at safe_z={safe_z:.3f} (Bug 92)"
+                    )
+                    self._move_to_pose_and_wait(
+                        self._make_pose(tgt_x, step_y, safe_z, orient),
+                        move_robot, get_observation, start_time, time_limit_sec,
+                        convergence_m=0.015, stage_timeout_sec=30.0,
+                        label=f"Stage 1 SFP T2 WP2 step {step_idx}/3 lateral",
+                        check_force=False,
+                    )
+                    obs_wp = get_observation()
+                    if obs_wp:
+                        orient = obs_wp.controller_state.tcp_pose.orientation
                 # Descend to transit_z so Stage 2 starts at a predictable height.
-                obs_wp = get_observation()
-                orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
                 self._move_to_pose_and_wait(
                     self._make_pose(tgt_x, tgt_y, transit_z, orient),
                     move_robot, get_observation, start_time, time_limit_sec,
