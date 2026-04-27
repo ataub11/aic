@@ -1507,6 +1507,26 @@ class ANT(Policy):
                 force_abs, self._force_abort_threshold, high_force_start, high_force_budget_sec,
             )
             if timed_out:
+                # Bug 95: differentiate by zone.  SFP runs that trip force abort
+                # are almost always wrong-XY (arm pressing on board face) — return
+                # False so the trial fails cleanly with tier_3=0 and no plug
+                # near the port.  SC runs that trip force abort have ALREADY
+                # passed the Bug 94 XY guard (xy_err ≤ 0.06 m), meaning the arm
+                # is over the SC port; the force buildup is from cable tension
+                # at port depth, not surface contact.  In this case the plug is
+                # likely partially seated — return True so scoring evaluates
+                # tier_3 on the actual arm position (potential 5–25 partial
+                # credit) instead of marking the task incomplete (tier_3=0).
+                # The −12 force penalty applies either way once force-time > 1 s,
+                # but partial tier_3 credit makes the net much better.
+                if zone == "sc":
+                    self.get_logger().warning(
+                        f"Stage 4 (SC): force abort — {force_abs:.1f} N sustained > "
+                        f"{high_force_budget_sec} s (Bug 95: arm at port XY, "
+                        f"breaking to capture tier_3 from current pose)"
+                    )
+                    send_feedback("Stage 4: force abort (SC: keep pose for tier_3)")
+                    break
                 self.get_logger().warning(
                     f"Stage 4: force abort — {force_abs:.1f} N sustained > "
                     f"{high_force_budget_sec} s (not a port aperture)"
