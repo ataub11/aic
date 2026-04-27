@@ -730,15 +730,46 @@ class ANT(Policy):
             obs_wp1 = get_observation()
             orient = obs_wp1.controller_state.tcp_pose.orientation if obs_wp1 else current_orient
             # WP2: lateral at safe_z — well above all board faces.
+            #
+            # Bug 93: split lateral into N small XY sub-steps to avoid SC cable
+            # snap-through.  In test sim the single 24 cm lateral move from
+            # (-0.382, 0.187) to (-0.383, 0.4295) at safe_z=0.28 m stalled at
+            # pos_error=0.128 m (arm only reached Y≈0.315) — same failure mode
+            # as T2 SFP that Bug 92 fixed via a 3-way split.  The SC cable at
+            # safe_z is more pretensioned (longer route to port) so we use
+            # ~6 cm step size, computed dynamically from total XY distance.
+            # Each sub-step's target is recomputed from the arm's actual
+            # position so a stalled step can't compound — the next step still
+            # tries to make 6 cm of progress from wherever the arm ended up.
+            obs_wp_step = get_observation()
+            if obs_wp_step is not None:
+                step_x = obs_wp_step.controller_state.tcp_pose.position.x
+                step_y = obs_wp_step.controller_state.tcp_pose.position.y
+                orient = obs_wp_step.controller_state.tcp_pose.orientation
+            else:
+                step_x = current_x
+                step_y = current_y
+            total_dist = float(np.hypot(base_x - step_x, base_y - step_y))
+            n_steps = max(1, int(np.ceil(total_dist / 0.06)))
             self.get_logger().info(
-                f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at safe_z={wp1_z:.3f}"
+                f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at "
+                f"safe_z={wp1_z:.3f} — splitting {total_dist*100:.1f} cm into "
+                f"{n_steps} sub-steps (Bug 93)"
             )
-            self._move_to_pose_and_wait(
-                self._make_pose(base_x, base_y, wp1_z, orient),
-                move_robot, get_observation, start_time, time_limit_sec,
-                convergence_m=0.015, stage_timeout_sec=30.0,
-                label="Stage 1 WP2 lateral (safe-Z)", check_force=False,
-            )
+            for sub in range(1, n_steps + 1):
+                t = sub / n_steps
+                tgt_x = step_x + (base_x - step_x) * t
+                tgt_y = step_y + (base_y - step_y) * t
+                self._move_to_pose_and_wait(
+                    self._make_pose(tgt_x, tgt_y, wp1_z, orient),
+                    move_robot, get_observation, start_time, time_limit_sec,
+                    convergence_m=0.015, stage_timeout_sec=20.0,
+                    label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (safe-Z)",
+                    check_force=False,
+                )
+                obs_sub = get_observation()
+                if obs_sub is not None:
+                    orient = obs_sub.controller_state.tcp_pose.orientation
             obs_wp2 = get_observation()
             orient = obs_wp2.controller_state.tcp_pose.orientation if obs_wp2 else orient
             # Record WP2 stall position for WP3 descent.
@@ -1372,15 +1403,22 @@ class ANT(Policy):
         start_y = contact_pose.position.y
         start_z = contact_pose.position.z
 
-        # Bug 79: abort if arm landed far from port in XY (wrong board area).
+        # Bug 79 + Bug 94: abort if arm landed far from port in XY (wrong board
+        # area).  Bug 79 used 0.15 m threshold — too loose: T3 sim with arm at
+        # 0.090 m XY error proceeded with Stage 4, hit the SC board face, and
+        # accumulated 0.3 s of 21.4 N force readings before force-abort.
+        # Tightened to 0.06 m: good runs (T1≈0.02 m, T2≈0.04 m) still proceed,
+        # bad runs (T3 with WP2 stall) skip Stage 4 cleanly with no force event.
+        # Cleaner result is tier_3=0 with no force-penalty risk vs. tier_3=0
+        # with risk of −12 if the cable buzzes the threshold for >1.0 s.
         if connector_pose is not None:
             xy_err = np.linalg.norm([
                 start_x - connector_pose.position.x,
                 start_y - connector_pose.position.y,
             ])
-            if xy_err > 0.15:
+            if xy_err > 0.06:
                 self.get_logger().warning(
-                    f"Stage 4: arm {xy_err:.3f}m from port XY — aborting"
+                    f"Stage 4: arm {xy_err:.3f}m from port XY — skipping insertion (Bug 94)"
                 )
                 return False
 
