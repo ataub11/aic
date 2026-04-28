@@ -41,7 +41,45 @@ and have the Dockerfile do a fresh colcon build, but that's deferred.
 | v14 | 23.20 | Same code as v11 — pure hardware-variance regression on a high-cable-tension day. T2 plug missed bounding radius. |
 | sim 42 | 104.08 | Bug 92 (T2 3-way split) confirmed working. |
 | sim 43 | 76.30 | Bug 93 (SC WP2 multi-step) navigation success but Bug 90 still missing from image (install/ stale) → SC Stage 4 force abort `return False` traded a likely partial insertion for −12 force penalty. |
-| sim 44 | **88.46** | Clean docker rebuild. Install/ synced. Bug 95 (SC force-abort `break`) added. T3 navigation + descent fully working — TCP reaches z=0.0142 (target 0.0095) — but plug ends up 0.19 m from port due to gripper-orientation issue. |
+| sim 44 | 88.46 | Clean docker rebuild. Install/ synced. Bug 95 (SC force-abort `break`) added. T3 navigation + descent fully working — TCP reaches z=0.0142 (target 0.0095) — but plug ends up 0.19 m from port due to gripper-orientation issue. |
+| **v17** | **23.25** | Real-HW reproduces v14 failure mode despite v15 fixes. T1 = 21.25 (dist=0.10 m, jerk=1.95 — identical to v14). T2 = 1.0 (dist=0.17 m — Bug 92 brought plug into measurement range vs unmeasurable in v14, still outside `init×0.5≈0.085 m` radius). T3 = 1.0 (dist=0.22 m — Bug 93 6 cm steps insufficient). No force penalties (Bug 94+95 working). v15 changes help marginally but worst-case days still unsolved. |
+
+## Real-HW vs sim variance pattern (key insight)
+
+Sim consistently produces ~88 with v15 code. Real HW oscillates between
+**23 (v14, v17)** and **88 (v11)**. Same code, same compose, different
+days. The difference correlates with cable pretension on the day:
+
+- **Good day** (low cable tension): Stage 1 lateral moves converge,
+  Stage 4 descends to port depth, T1=50/T2=37/T3=1 → 88 total.
+- **Bad day** (high cable tension): Stage 1 lateral moves stall short,
+  arm ends up 5–17 cm from port XY, Stage 4 either skipped (Bug 94) or
+  descends to wrong place. T1=21/T2=1/T3=1 → 23 total.
+
+**Bug 92's 1.75 cm and Bug 93's 6 cm sub-steps are the limit of what
+sub-step size can achieve.** Smaller steps don't help if the cable
+equilibrium force exceeds spring authority at any point in the motion.
+The next robustness lever is one of:
+
+1. **Lower safe_z** for T2 lateral (currently 0.28 m). Reduces cable
+   pretension by routing closer to the table. Risk: NIC mount collision
+   at Y≈0.233 if safe_z < 0.21. Could try safe_z=0.235 (2.5 cm
+   clearance).
+2. **Joint-space lateral** instead of cartesian. Joint moves don't fight
+   cable tension the same way — the impedance controller is what
+   accumulates the equilibrium. A `_run_joint_settle`-style move at
+   pre-computed joint targets for T2 port might bypass the issue.
+3. **Higher max_wrench during lateral**. Currently 15 N hard cap. If we
+   raise to 20 N for the lateral phase only, more force authority to push
+   through cable equilibrium. Risk: 20 N approaches the scoring-penalty
+   ceiling on the FT sensor reading.
+4. **Lateral feedforward** (Y-direction force) tied to remaining
+   distance. Bug 76 attempted this and was reverted (Bug 82) because it
+   shifted the equilibrium *further* from the port at low Z. Could be
+   safer at safe_z where cable geometry differs.
+
+All four are non-trivial and need ≥3 sim iterations to validate they
+don't regress T1's 50.32 baseline. None has been tried yet.
 
 ## v15 ships with these robustness fixes (vs v11/v14)
 
