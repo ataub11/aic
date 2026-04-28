@@ -16,6 +16,8 @@ All parameters marked CALIBRATE must be tuned once from a run with
 """
 
 import collections
+import os
+
 import cv2
 import numpy as np
 
@@ -55,6 +57,17 @@ class SurfaceContactError(Exception):
 class ANT(Policy):
     def __init__(self, parent_node):
         super().__init__(parent_node)
+
+        # ---- build version marker ------------------------------------------
+        # Injected at docker build time via ARG BUILD_VERSION → ENV
+        # ANT_BUILD_VERSION (Dockerfile + submit.sh).  Logged once at startup
+        # so every eval log identifies which git SHA is running — eliminates
+        # ambiguity between source state, install/ stale copy, and docker
+        # cache.  Falls back to "unknown" if the env var was not set.
+        self.build_version = os.environ.get("ANT_BUILD_VERSION", "unknown")
+        self.get_logger().info(
+            f"ANT policy startup: build_version={self.build_version}"
+        )
 
         # ---- impedance control parameters ----------------------------------
         self.approach_stiffness = 85.0    # N/m — used for Stages 1–3 (free-space positioning)
@@ -133,6 +146,24 @@ class ANT(Policy):
         self.cable_force_baseline_default = 22.5  # N — fallback if calibration fails
         self.cable_baseline_samples = 20           # FTS samples to average (~2 sim-sec)
         self.cable_force_baseline = self.cable_force_baseline_default
+
+        # ---- adaptive lateral feedforward (Bug 96, Option A) ----------------
+        # Real-HW oscillates ~88 (good day, low cable tension) vs ~23 (bad day,
+        # high cable tension) on the *same* code (v11 vs v14/v17).  Bug 92's
+        # 3-way split and Bug 93's 6 cm sub-steps are the limit of what
+        # step-size alone can achieve — on a high-tension day the cable
+        # equilibrium force still stalls the impedance controller short of
+        # the port.  Use the cable_force_baseline calibrated at Stage 1 start
+        # as a tension proxy: when it exceeds the threshold, shrink the
+        # lateral step size and apply a small Y-direction feedforward toward
+        # the port for the lateral phase only.  Below the threshold the
+        # behaviour matches v15 exactly so the T1 50.32 baseline is
+        # preserved.  Numbers are conservative — start small, escalate if
+        # sims show further headroom.
+        self.high_tension_baseline_threshold_n = 21.0  # N (mid-point of 18–22 typical range)
+        self.lateral_feedforward_n = 4.0               # N along Y, signed by step direction
+        self.t2_sfp_high_tension_steps = 5             # 5-way split (~1 cm/step) vs default 3-way (~1.75 cm/step)
+        self.t3_sc_high_tension_step_m = 0.035         # 3.5 cm per step vs default 0.06 m
 
         # ---- trial counter --------------------------------------------------
         # Incremented at the start of each insert_cable() call.  Used to select
@@ -220,6 +251,13 @@ class ANT(Policy):
         → force_abs=20.4 N → would abort before descent with a fixed threshold).
         """
         return self.cable_force_baseline + 3.0
+
+    @property
+    def _high_tension(self) -> bool:
+        """True when the calibrated cable baseline indicates a high-tension
+        day, in which case the Stage 1 lateral approach gets smaller sub-steps
+        and a small Y feedforward toward the port (Bug 96 Option A)."""
+        return self.cable_force_baseline > self.high_tension_baseline_threshold_n
 
     def _high_force_timed_out(
         self,
@@ -618,33 +656,45 @@ class ANT(Policy):
                     )
                     obs_wp = get_observation()
                     orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
-                # Bug 89 → Bug 92 upgrade: 2-way split → 3-way split lateral approach.
-                # Bug 89 (2-way, 20 s/step) worked in v11 (T2=37.23) but failed in
-                # v14 under a higher-tension cable day — arm missed the T2 bounding
-                # radius entirely.  Root cause: 2.63 cm half-steps still trigger
-                # snap-through when pretension is elevated; the arm snaps backward past
-                # its starting Y and the second half-move must cover more distance than
-                # originally planned.  3-way split (1/3, 2/3, 1.0 of total Y delta)
-                # reduces each increment to ~1.75 cm.  Timeouts extended 20→30 s/step
-                # (still well within trial budget) for more cable-creep settling time.
-                # Y fractions are computed once from the arm's actual position at the
-                # start of each step so cable snap-through in one step doesn't compound
-                # into subsequent steps.
+                # Bug 89 → Bug 92 → Bug 96 (Option A) upgrade: 3-way split adapts
+                # to N-way + Y feedforward on high-tension days.  Bug 92 (3-way,
+                # 1.75 cm/step) recovered T2 in sim/typical-tension HW but still
+                # stalled in v17 on a high-tension day.  Option A reads the
+                # cable_force_baseline calibrated moments earlier and, when it
+                # exceeds the threshold, shrinks the split to 5-way (~1 cm/step)
+                # AND applies a small Y feedforward toward the port (~4 N).  On
+                # low-tension days behaviour is identical to Bug 92.  Y fractions
+                # are still computed from the arm's actual position at the start
+                # of each step so cable snap-through in one step doesn't compound.
                 obs_wp = get_observation()
                 y_now = obs_wp.controller_state.tcp_pose.position.y if obs_wp else current_y
                 y_delta = tgt_y - y_now
-                for step_idx, fraction in enumerate((1/3, 2/3, 1.0), start=1):
+                high_tension = self._high_tension
+                n_split = self.t2_sfp_high_tension_steps if high_tension else 3
+                ff_y = (
+                    float(np.sign(y_delta)) * self.lateral_feedforward_n
+                    if high_tension and y_delta != 0.0
+                    else 0.0
+                )
+                self.get_logger().info(
+                    f"Stage 1 SFP T2: lateral plan baseline={self.cable_force_baseline:.2f} N "
+                    f"→ high_tension={high_tension}, n_split={n_split}, ff_y={ff_y:.1f} N (Bug 96A)"
+                )
+                fractions = tuple((i + 1) / n_split for i in range(n_split))
+                for step_idx, fraction in enumerate(fractions, start=1):
                     step_y = y_now + y_delta * fraction
                     self.get_logger().info(
-                        f"Stage 1 SFP T2: WP2 step {step_idx}/3 → "
-                        f"({tgt_x:.4f},{step_y:.4f}) at safe_z={safe_z:.3f} (Bug 92)"
+                        f"Stage 1 SFP T2: WP2 step {step_idx}/{n_split} → "
+                        f"({tgt_x:.4f},{step_y:.4f}) at safe_z={safe_z:.3f} "
+                        f"ff_y={ff_y:.1f} N"
                     )
                     self._move_to_pose_and_wait(
                         self._make_pose(tgt_x, step_y, safe_z, orient),
                         move_robot, get_observation, start_time, time_limit_sec,
                         convergence_m=0.015, stage_timeout_sec=30.0,
-                        label=f"Stage 1 SFP T2 WP2 step {step_idx}/3 lateral",
+                        label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
                         check_force=False,
+                        feedforward_fy=ff_y,
                     )
                     obs_wp = get_observation()
                     if obs_wp:
@@ -750,11 +800,26 @@ class ANT(Policy):
                 step_x = current_x
                 step_y = current_y
             total_dist = float(np.hypot(base_x - step_x, base_y - step_y))
-            n_steps = max(1, int(np.ceil(total_dist / 0.06)))
+            # Bug 96 (Option A): adapt step size + Y feedforward to baseline.
+            # On low-tension days keep the v15 6 cm step + 0 N ff (preserves
+            # T1 50.32 baseline).  On high-tension days shrink to 3.5 cm and
+            # apply a small Y feedforward toward the port — same lever as the
+            # T2 SFP block above.
+            high_tension = self._high_tension
+            step_size_m = self.t3_sc_high_tension_step_m if high_tension else 0.06
+            n_steps = max(1, int(np.ceil(total_dist / step_size_m)))
+            y_dir = float(np.sign(base_y - step_y))
+            ff_y = (
+                y_dir * self.lateral_feedforward_n
+                if high_tension and y_dir != 0.0
+                else 0.0
+            )
             self.get_logger().info(
                 f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at "
-                f"safe_z={wp1_z:.3f} — splitting {total_dist*100:.1f} cm into "
-                f"{n_steps} sub-steps (Bug 93)"
+                f"safe_z={wp1_z:.3f} — baseline={self.cable_force_baseline:.2f} N, "
+                f"high_tension={high_tension}, step={step_size_m*100:.1f} cm, "
+                f"splitting {total_dist*100:.1f} cm into {n_steps} sub-steps, "
+                f"ff_y={ff_y:.1f} N (Bug 96A)"
             )
             for sub in range(1, n_steps + 1):
                 t = sub / n_steps
@@ -766,6 +831,7 @@ class ANT(Policy):
                     convergence_m=0.015, stage_timeout_sec=20.0,
                     label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (safe-Z)",
                     check_force=False,
+                    feedforward_fy=ff_y,
                 )
                 obs_sub = get_observation()
                 if obs_sub is not None:

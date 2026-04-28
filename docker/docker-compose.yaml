@@ -19,6 +19,8 @@ services:
     build:
       dockerfile: docker/ant_policy_node/Dockerfile
       context: ..
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-unknown}
     gpus: all
     networks:
       - default
