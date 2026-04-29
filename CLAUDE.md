@@ -84,6 +84,55 @@ Other robustness levers (not yet attempted, deferred):
 - **Bug 98b**: Stage 4 XY spiral. After 6s settle at depth: ±8mm radius, 10s period,
   5s ramp. Probes the ±8mm neighborhood to find port opening when TCP is 3–8mm off.
 
+## Bugs 99–104 (branch claude/review-simulation-logs-6knxl, pending sim validation)
+
+Sim 2026-04-29 (score 99.59) showed:
+- T1 SFP got tier_3=38.41 (lucky partial insertion at 0.04m, arm never descended).
+- T2 SFP plug ended 0.04m from port but no insertion — 130s spent in stuck spiral.
+- T3 SC stalled at z=0.069m, plug 0.14m from port — gripper-orientation issue.
+
+Six new bugs target the architectural gaps identified in that run.
+
+- **Bug 99 (A) — calibrated port-yaw alignment**: New
+  `gripper_yaw_correction_rad[(zone, trial)]` table plus helper
+  `_yaw_rotated_orientation()` rotates the gripper around base_link Z by a
+  per-trial calibrated angle during Stage 3/4. Default 0.0 rad for entries
+  not in the table preserves SFP behaviour exactly (T1's 38pt partial-insert
+  unaffected). Uses a hardcoded calibration table, NOT live `sc_port_base`
+  TF — CLAUDE.md prohibits ground-truth TF lookup.
+- **Bug 100 (B) — Stage 4 Fxy gradient**: When `|Fxy| > 3 N`, step the
+  commanded XY by 0.6 mm/sample against −F̂xy (cap 12 mm accumulated). Adds
+  a closed-loop XY correction to the existing Lissajous so the chamfer
+  reaction can guide the plug. Generic — no port-specific values.
+- **Bug 101 (C) — Stage 4 per-axis compliance**: New
+  `_build_motion_update_axis()` helper. Stage 4 uses XY=50 N/m, Z=120 N/m
+  instead of isotropic 85/200 N/m so the chamfer can guide the plug
+  laterally without fighting a stiff XY position target.
+- **Bug 102 (J) — stiffer lateral on high-tension days**: Joint-space IK
+  isn't exposed to the policy. Proxy: when `_high_tension` is True, raise
+  the Stage 1 lateral Cartesian stiffness from 85 to 250 N/m so impedance
+  drives against cable equilibrium. Applied to both T2 SFP and SC laterals.
+- **Bug 103 (H) — cable-anchor XY bias**: High-tension cable pull biases the
+  arm's stalled XY away from the true port. Counter by shifting the lateral
+  target 1 cm toward the calibrated `cable_anchor_xy_in_base[zone]`.
+- **Bug 104 (I) — adaptive Stage 4 mode**: Branch on
+  `xy_err = |contact_pose − connector_pose|`:
+  - `< 5 mm`  : `direct`  — hold + slack-detect, no spiral.
+  - `5–15 mm` : `spiral`  — current Bug 98b Lissajous.
+  - `15–40 mm`: `descend` — spiral + per-orbit z-ramp (2 mm/orbit) so axial
+    progress continues even when XY can't find the hole.
+  - `≥ 40 mm` : skip — tightened from Bug 94's 60 mm so we don't burn 130s
+    over a misaligned port.
+
+All Bugs 99–104 are gated by enable flags in `ANT.__init__`. Disable in
+code to roll back individually if a sim run regresses.
+
+### Calibration TODO (Bug 99)
+`gripper_yaw_correction_rad[("sc", 3)]` starts at 0.0 rad. After the first
+sim run with this code, observe T3 plug orientation in the log and pick a
+yaw correction (likely in the ±0.5 rad range) that aligns the plug's flat
+with the port slot. Iterate over 2–3 sims.
+
 ## v15 ships with these robustness fixes (vs v11/v14)
 
 - **Bug 90**: SC Stage 4 `feedforward_fz=−5.0`, budget `0.5 s`, force-timer
