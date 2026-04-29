@@ -160,7 +160,14 @@ class ANT(Policy):
         # behaviour matches v15 exactly so the T1 50.32 baseline is
         # preserved.  Numbers are conservative — start small, escalate if
         # sims show further headroom.
-        self.high_tension_baseline_threshold_n = 21.0  # N (mid-point of 18–22 typical range)
+        #
+        # Threshold lowered 21.0 → 20.5 N after sim run 2026-04-28 showed all
+        # three trials had baselines 18.85–20.90 N (under 21.0) — Bug 96A's
+        # adaptive code never fired in sim, so we couldn't validate the
+        # high-tension path before shipping.  At 20.5 N, T1 (20.90) and T3
+        # Stage-1 (20.80) trigger in sim.  T2 (20.47) and T3 Stage-4 (18.85)
+        # still don't.  Real-HW bad days (baseline ≥ 21 N) keep firing.
+        self.high_tension_baseline_threshold_n = 20.5  # N (was 21.0 — see commit log)
         self.lateral_feedforward_n = 4.0               # N along Y, signed by step direction
         self.t2_sfp_high_tension_steps = 5             # 5-way split (~1 cm/step) vs default 3-way (~1.75 cm/step)
         self.t3_sc_high_tension_step_m = 0.035         # 3.5 cm per step vs default 0.06 m
