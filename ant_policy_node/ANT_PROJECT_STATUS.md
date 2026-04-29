@@ -1,6 +1,6 @@
 # ANT Policy — Project Status Summary
 
-> Last updated: 2026-04-28 (**ECR v17 competition result: 23.25 (T1=21.25 dist=0.10m partial, T2=1.0 dist=0.17m outside scoring radius, T3=1.0 dist=0.22m). Real-HW high-tension cable day reproducing v14 (23.20) failure mode despite v15 fixes. Bug 92 (T2 3-way split) helped marginally — T2 plug now within measurement range (0.17m vs unmeasurable in v14) but still outside `init_dist × 0.5` scoring radius (~0.085m for T2). Bug 93 (SC WP2 multi-step) didn't visibly improve T3 (still 0.22m, same as v14). Conclusion: 1.75 cm steps for T2 and 6 cm steps for SC are insufficient on the worst-case cable tension days. Need either smaller steps + longer per-step timeouts, or fundamentally different approach (e.g., joint-space lateral, lower safe_z to reduce pretension, different stiffness during lateral).**
+> Last updated: 2026-04-29 (**Sim 2026-04-28: 103.05 (T1=50.01 partial 0.04m, T2=37.30 no-insert 0.03m, T3=15.74 no-insert 0.14m). Bugs 96A/97/98 implemented and merged to main. Bug 96A: adaptive lateral feedforward (5-way split + 4N Y-force) on high-tension days (baseline > 20.5N). Bug 97: SC Stage 1 sub-step splitting always fires (flat WP1→WP2→WP3). Bug 98a: Stage 4 cable-slack early exit (|F| < baseline−5N for 2s). Bug 98b: Stage 4 XY spiral (±8mm, 10s period, starts at 6s settle) to find port opening when XY slightly off. Pending: sim validation of Bugs 97+98 (first test run post-implementation). Prior context: ECR v17=23.25 (high-tension day), sim 44=88.46, ECR v11=88.28.**
 >
 > Prior context: ECR v15/v17 sim 88.46 (matches v11 baseline). ECR v14 = 23.20 = same code as v11 (hardware variance). ECR v11 = 88.28 (T1=50.05, T2=37.23, T3=1.0). Real-HW oscillates 23–88 between days. Bug 66 (SC WP2 cable equilibrium stall) and the new high-tension T2 stall are the open robustness problems.
 
@@ -77,6 +77,7 @@ A geometric cable-insertion policy for a UR5e robot arm in the AI for Industry C
 | **T3 plug-orientation deep-dive (post sim 44)** | — | Investigated why TCP at correct XYZ leaves plug 19 cm away. Findings: (1) `gripper/tcp` is +0.172 m offset from `gripper/hande_base_link` per `robotiq_hande_macro.xacro:159-165`; (2) cable `cable_connection_0_link` is **`sc_plug_link`** for T3 (`cable.sdf.xacro:17`) — plug attached directly to gripper, not via cable rope; (3) `sc_tip_link` is +11.65 mm offset in plug-local +X with rotation (−π/2, 0, −π/2) per `SC Plug/model.sdf:142`; (4) scoring computes Euclidean distance between `sc_tip` and `sc_port_base` TF frames in `aic_world` per `ScoringTier2.cc:497-521,478-488`; (5) bounding radius = `initial_distance × 0.5` per `ScoringTier2.cc:720-728` — with init_dist≈0.20 m, scoring window is roughly [0.015, 0.115] m, so 0.19 m is outside → tier_3=0. **To score tier_3 ≥ 1 on T3 we need final dist ≤ ~0.115 m** = 7-8 cm closer than current. This requires explicit gripper orientation alignment with the SC port's insertion axis — significant code change with high risk of disrupting T1/T2 (which currently produce 87 of our 88 total). Deferred to future iteration; v15 ships as-is. |
 | **ECR v15** | **READY TO SUBMIT** | Sim 88.46 reproduces v11 baseline (88.28) and substantially better worst case than v14 (23.20 hardware-variance regression). Bug 92 (T2 3-way split) + Bug 93 (SC WP2 multi-step) + Bug 94 (Stage 4 XY guard 0.06 m) + Bug 95 (SC force-abort `break`) + install sync (Bug 90 finally lands). Expected real-HW: 50–100 range. T3 plug-orientation issue documented as next investigation target (Bug 96 candidate — requires gripper rotation control to align sc_tip insertion axis with sc_port_base axis). |
 | **ECR v17** | **23.25** | Same code as v15 (sim 88.46) on real HW — cable-tension day reproduced v14 (23.20) failure mode. T1=21.25 (dist=0.10m partial, jerk=1.95 m/s³ — matches v14's 1.93 → identical real-HW behavior); T2=1.0 (dist=0.17m — Bug 92 brought plug within measurement range but outside `init×0.5≈0.085m` scoring radius); T3=1.0 (dist=0.22m — Bug 93 6 cm steps not aggressive enough on this day). No force penalties anywhere — Bug 94+95 working as designed. Pattern shows the v15 changes help marginally but don't fully solve worst-case days. |
+| **sim 2026-04-28** | **103.05** | First run of Bug 96A (adaptive lateral feedforward). T1=50.01 (tier_3=38.41 partial 0.04m, traj_eff=6, smooth=4.60), T2=37.30 (tier_3=25 no-insert 0.03m, smooth=5.30), T3=15.74 (tier_3=5.40 no-insert 0.14m, smooth=3.33). `build_version=unknown` — pixi bypass before pixi_env_setup.sh was patched. Bug 96A never triggered (all baselines 18.85–20.90N < 20.5N threshold; threshold was 21N, lowered to 20.5N post-run). Bug 97 not yet implemented (T3 still hit bypass path). Bug 98 not yet implemented. Score improvement vs sim 44 (88.46) is largely sim variance / T3 favorable lateral convergence. **Scoring insight decoded from aic_scoring/src/ScoringTier2.cc**: full insertion=75pts; partial insertion=38–50pts (5mm XY gate, plug.x AND plug.y must be within ±5mm of port); no-insert (in bounding radius)=0–25pts linear; bounding radius=init_dist×0.5. T2 at 3cm from port scores only 25 (no-insert) not partial because XY > 5mm — spiral fishing directly addresses this. |
 
 ---
 
@@ -110,7 +111,9 @@ Navigate directly to the calibrated port position (no grid scan). The SFP bracke
 - T1 (trial=1): approach T1 port at (−0.3845, 0.200) directly at transit_z.
 - T2 (trial=2): ascend to safe_z=0.28m, lateral to T2 port (−0.3845, 0.2526), descend to transit_z (clears NIC mount at Y≈0.233 which is between T1 and T2).
 
-### SC Stage 1 (Run 23+)
+### SC Stage 1 (Run 23+ / Bug 97 2026-04-29)
+
+**Bug 97 (2026-04-29): Sub-step splitting always fires.** Prior code took an `if/else` branch — if arm started at z≥safe_z−0.01, it skipped the ascent to safe_z and moved laterally at current height, bypassing Bug 93's sub-step logic entirely. Refactored into flat sequence: WP1 (conditional ascent) → WP2 (ALWAYS sub-step lateral at n_steps=ceil(dist/step_size)) → WP3 (conditional descent). Fix ensures sub-step splitting is active regardless of starting Z.
 
 **Prescan DISABLED (Bug 58):** Both prescan positions stalled 14–22 cm from targets. The SC cable plug appears at the image bottom (v≈779, bottom 13% of frame), outside the 30% centre mask. SC housing (area ≈436k px²) exceeds max_area=10k from stall distance. Result: plug always detected, back-projected 18–19 cm off, rejected by proximity filter; 53 s wasted per T3.
 
@@ -128,6 +131,8 @@ Navigate directly to the calibrated port position (no grid scan). The SFP bracke
 
 ## Stage 4 — Compliant Insertion
 
+- **Bug 98a (2026-04-29): Cable-slack early exit.** During Stage 4, monitors `force_abs < cable_force_baseline − 5N` sustained for 2s. If triggered, breaks out early (returns True). Signal: cable went slack = plug seated past port entrance, cable tension dropped. Tunable: `stage4_slack_drop_n=5.0`, `stage4_slack_sustained_sec=2.0`. Expected benefit: reduces wasted time at insertion depth on trials where plug is already inserted.
+- **Bug 98b (2026-04-29): XY spiral fishing.** After 6s settle at insertion depth, applies a spiral offset to the XY target: ±8mm radius, 10s period, 5s ramp from 0 to full radius. Spiral centered on Stage 4 start XY. Tunable: `stage4_settle_sec=6.0`, `stage4_spiral_max_radius_m=0.008`, `stage4_spiral_ramp_sec=5.0`, `stage4_spiral_period_sec=10.0`. Expected benefit: when TCP is 3–8mm from port opening (as T2 typically is at 0.03m distance), spiral probes the ±8mm neighborhood and drops in when over the opening.
 - **Bug 67 fix (2026-04-14):** Immediately holds cmd_z = `connector_z − 5mm` for up to 120 s. Constant sustained load accelerates viscoelastic cable creep. All 3 trials use constant hold (Bug 68 ramp removed 2026-04-17).
 - **Bug 72 fix (2026-04-17):** `insertion_stiffness = 200 N/m` used for T1/T2 (SFP) in Stage 4. Combined with max_wrench=15N: T1 spring=15N (saturated), T2 spring=10.2N. Higher than old 8.8N → more force authority on real hardware.
 - **Bug 74 fix (2026-04-17):** T3 (SC) Stage 4 uses `approach_stiffness = 85 N/m`. With 200N/m+15N ceiling, SC arm overshoots viable tcp_z zone (0.09–0.10m) → tcp_z=0.0304, tier_3=0 (Run 31). At 85N/m spring=7.7N < cable tension → slow creep → arm stays in viable zone → tier_3≈6–8.
@@ -188,6 +193,16 @@ All ANT.py calibration constants are in **base_link**. This was a critical bug b
 
 | Parameter | Value | History |
 |-----------|-------|---------|
+| `high_tension_baseline_threshold_n` | `20.5 N` | Bug 96A (2026-04-29). Threshold for adaptive high-tension path. Was 21.0N, lowered to 20.5N so T1 (20.90N baseline) and T3-stage1 (20.80N) trigger in sim for validation. On high-tension days, activates 5-way split + 4N Y-feedforward for T2 lateral; tighter step_m for SC lateral. |
+| `lateral_feedforward_n` | `4.0 N` | Bug 96A — Y-axis feedforward during high-tension lateral sub-steps. Pushes through cable equilibrium. |
+| `t2_sfp_high_tension_steps` | `5` | Bug 96A — number of sub-steps for T2 SFP lateral on high-tension days (vs 3 on normal days). |
+| `t3_sc_high_tension_step_m` | `0.035 m` | Bug 96A — max sub-step size for SC lateral on high-tension days (vs 0.06m normal). |
+| `stage4_settle_sec` | `6.0 s` | Bug 98b — settle time before XY spiral starts in Stage 4. |
+| `stage4_slack_drop_n` | `5.0 N` | Bug 98a — cable slack detection threshold: `|F| < baseline − slack_drop_n` for 2s = early exit. |
+| `stage4_slack_sustained_sec` | `2.0 s` | Bug 98a — sustained time below slack threshold required for early exit. |
+| `stage4_spiral_max_radius_m` | `0.008 m` | Bug 98b — maximum XY spiral radius (8mm). |
+| `stage4_spiral_ramp_sec` | `5.0 s` | Bug 98b — time to ramp from 0 to max radius. |
+| `stage4_spiral_period_sec` | `10.0 s` | Bug 98b — full revolution period of XY spiral. |
 | `zone_scouting_xy` | `{sfp: (−0.3845, 0.200), sc: (−0.3830, 0.4295)}` | SFP: Y changed 0.2126→0.200 (Bug 51): right finger now at Y≈0.220, 13mm clear of NIC mount at Y≈0.233. Value is unused in SFP fast path (kept for symmetry). SC unchanged. |
 | `connector_z_in_base` | `{sfp: 0.1335, sc: 0.0145}` | Unchanged — back-projection reference depth |
 | SFP vision | Fast path (no scan) | HSV blind top-down; goes directly to calibrated port |

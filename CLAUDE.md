@@ -43,6 +43,8 @@ and have the Dockerfile do a fresh colcon build, but that's deferred.
 | sim 43 | 76.30 | Bug 93 (SC WP2 multi-step) navigation success but Bug 90 still missing from image (install/ stale) → SC Stage 4 force abort `return False` traded a likely partial insertion for −12 force penalty. |
 | sim 44 | 88.46 | Clean docker rebuild. Install/ synced. Bug 95 (SC force-abort `break`) added. T3 navigation + descent fully working — TCP reaches z=0.0142 (target 0.0095) — but plug ends up 0.19 m from port due to gripper-orientation issue. |
 | **v17** | **23.25** | Real-HW reproduces v14 failure mode despite v15 fixes. T1 = 21.25 (dist=0.10 m, jerk=1.95 — identical to v14). T2 = 1.0 (dist=0.17 m — Bug 92 brought plug into measurement range vs unmeasurable in v14, still outside `init×0.5≈0.085 m` radius). T3 = 1.0 (dist=0.22 m — Bug 93 6 cm steps insufficient). No force penalties (Bug 94+95 working). v15 changes help marginally but worst-case days still unsolved. |
+| **sim 2026-04-28** | **103.05** | First run with Bug 96A code. Threshold was 21.0N (lowered to 20.5N after), so high-tension path never triggered — score is mostly sim variance + favorable T3 lateral. T1=50.01, T2=37.30, T3=15.74. `build_version=unknown` (pixi bypass; now fixed). |
+| **main (Bugs 96A/97/98)** | **PENDING SIM** | Bug 96A: adaptive lateral feedforward (5-way split + 4N Y) when baseline > 20.5N. Bug 97: SC Stage 1 sub-step always fires. Bug 98a: Stage 4 cable-slack early exit. Bug 98b: Stage 4 XY spiral ±8mm. Need ≥3 sim runs to validate. |
 
 ## Real-HW vs sim variance pattern (key insight)
 
@@ -56,30 +58,31 @@ days. The difference correlates with cable pretension on the day:
   arm ends up 5–17 cm from port XY, Stage 4 either skipped (Bug 94) or
   descends to wrong place. T1=21/T2=1/T3=1 → 23 total.
 
-**Bug 92's 1.75 cm and Bug 93's 6 cm sub-steps are the limit of what
-sub-step size can achieve.** Smaller steps don't help if the cable
-equilibrium force exceeds spring authority at any point in the motion.
-The next robustness lever is one of:
+**Bug 96A (2026-04-29) implements lateral feedforward at safe_z.** When
+`cable_force_baseline > 20.5N` (high-tension day), T2 SFP lateral uses
+5-way split (vs 3-way) with 4N Y-direction feedforward per sub-step.
+SC lateral uses 3.5 cm sub-steps (vs 6 cm). Threshold lowered from 21.0N
+to 20.5N so typical sim baselines (T1≈20.9N, T3-stage1≈20.8N) trigger
+for validation.
 
-1. **Lower safe_z** for T2 lateral (currently 0.28 m). Reduces cable
-   pretension by routing closer to the table. Risk: NIC mount collision
-   at Y≈0.233 if safe_z < 0.21. Could try safe_z=0.235 (2.5 cm
-   clearance).
-2. **Joint-space lateral** instead of cartesian. Joint moves don't fight
-   cable tension the same way — the impedance controller is what
-   accumulates the equilibrium. A `_run_joint_settle`-style move at
-   pre-computed joint targets for T2 port might bypass the issue.
-3. **Higher max_wrench during lateral**. Currently 15 N hard cap. If we
-   raise to 20 N for the lateral phase only, more force authority to push
-   through cable equilibrium. Risk: 20 N approaches the scoring-penalty
-   ceiling on the FT sensor reading.
-4. **Lateral feedforward** (Y-direction force) tied to remaining
-   distance. Bug 76 attempted this and was reverted (Bug 82) because it
-   shifted the equilibrium *further* from the port at low Z. Could be
-   safer at safe_z where cable geometry differs.
+Other robustness levers (not yet attempted, deferred):
 
-All four are non-trivial and need ≥3 sim iterations to validate they
-don't regress T1's 50.32 baseline. None has been tried yet.
+1. **Lower safe_z** for T2 lateral (currently 0.28 m). Risk: NIC mount collision at Y≈0.233 if safe_z < 0.21.
+2. **Joint-space lateral** instead of cartesian — bypasses impedance accumulation.
+3. **Higher max_wrench during lateral** (from 15N to 20N). Risk: approaches force-penalty ceiling.
+
+## Bugs 96A/97/98 (main branch, pending sim validation)
+
+- **Bug 96A**: Adaptive lateral feedforward. `_high_tension` property true when
+  `cable_force_baseline > 20.5N`. T2 SFP: 5-way split + 4N Y feedforward each step.
+  SC: 3.5 cm sub-steps (vs 6 cm). Generic: works for any port configuration.
+- **Bug 97**: SC Stage 1 sub-step always fires. Refactored if/else into flat
+  WP1 (conditional ascent) → WP2 (always sub-step lateral) → WP3 (conditional descent).
+  Prior code bypassed sub-steps when arm started at z≥safe_z−0.01 (common case in T3).
+- **Bug 98a**: Stage 4 cable-slack early exit. `|F| < baseline − 5N` for 2s → break.
+  Signal: plug past port entrance, cable tension dropped. Tunable tunables in `__init__`.
+- **Bug 98b**: Stage 4 XY spiral. After 6s settle at depth: ±8mm radius, 10s period,
+  5s ramp. Probes the ±8mm neighborhood to find port opening when TCP is 3–8mm off.
 
 ## v15 ships with these robustness fixes (vs v11/v14)
 
@@ -103,7 +106,7 @@ don't regress T1's 50.32 baseline. None has been tried yet.
   inserted — return True so scoring evaluates tier_3 (potential 5–25
   partial credit) instead of marking task incomplete (tier_3=0).
 
-## Open T3 problem (Bug 96 candidate, not yet attempted)
+## Open T3 problem (partially addressed by Bug 98b)
 
 Sim 44 showed Bug 92/93/94/95 deliver the arm to the SC port: TCP at
 xy_err=0.005 m, descended to z=0.0142 m (target 0.0095 m). But the
