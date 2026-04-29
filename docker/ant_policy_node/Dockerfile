@@ -1,5 +1,11 @@
 FROM docker.io/library/ros:kilted-ros-core AS build
 
+# Build-time SHA injection — submit.sh passes the current git rev so every
+# image is self-identifying.  ANT.py reads ANT_BUILD_VERSION at startup and
+# logs it, so every eval log starts with the SHA that's actually running.
+ARG BUILD_VERSION=unknown
+ENV ANT_BUILD_VERSION=${BUILD_VERSION}
+
 # Install pixi — no version pin needed; lock file is self-contained and
 # the docker-specific pixi.toml/pixi.lock live alongside this Dockerfile.
 RUN apt update && apt install -y git && \

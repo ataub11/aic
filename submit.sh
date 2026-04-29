@@ -43,6 +43,16 @@ echo ""
 echo "=== Step 1: Building image ${LOCAL_TAGGED} ==="
 # Keep docker-compose image tag in sync with the requested tag.
 sed -i "s|image: ant-policy:.*|image: ${LOCAL_TAGGED}|" "$DOCKER_COMPOSE_FILE"
+# Inject the current git SHA (with a -dirty suffix when the tree has
+# uncommitted changes) as BUILD_VERSION; ANT.py logs it on startup so every
+# eval log identifies the exact code that shipped.  Falls back gracefully if
+# git isn't available or this isn't a repo.
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [[ "$GIT_SHA" != "unknown" ]] && ! git diff --quiet HEAD 2>/dev/null; then
+  GIT_SHA="${GIT_SHA}-dirty"
+fi
+export BUILD_VERSION="${TAG}-${GIT_SHA}"
+echo "BUILD_VERSION=${BUILD_VERSION}"
 docker compose -f "$DOCKER_COMPOSE_FILE" build model
 
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
