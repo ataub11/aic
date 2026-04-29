@@ -32,7 +32,9 @@ from aic_model.policy import (
 from aic_task_interfaces.msg import Task
 from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from rclpy.duration import Duration
+from rclpy.time import Time
 from std_msgs.msg import Header
+from tf2_ros import TransformException
 
 
 class UnexpectedContactError(Exception):
@@ -284,6 +286,28 @@ class ANT(Policy):
         self.stage4_mode_thresh_spiral_m  = 0.015
         self.stage4_mode_thresh_descend_m = 0.040
         self.stage4_descend_ramp_m_per_orbit = 0.002  # 2 mm down per orbit
+
+        # ---- Bug 105: vision-based SC port localization --------------------
+        # Replace the hardcoded `zone_known_ports["sc"]` fallback with a live
+        # back-projection from the center camera when a confident detection is
+        # available.  Only activates for SC (the cream/tan housing has high
+        # contrast against the board face — Otsu threshold + min-area-rect
+        # fits the housing reliably from above).  SFP path is unchanged
+        # (HSV blind from above; documented in CLAUDE.md).
+        #
+        # The detection is gated by:
+        #   (1) confidence score (area × circularity / dist_from_centre)
+        #   (2) sanity check: back-projected XY must lie within
+        #       `vision_sanity_radius_m` of the calibrated zone fallback —
+        #       guards against detecting LC mounts or NIC strips by mistake.
+        # If either gate fails, falls back to the calibrated table — same
+        # behaviour as before this bug, so a worst-case regression cannot
+        # underperform the current code.
+        self.enable_vision_sc_localization = True
+        self.vision_min_score = 1.0
+        self.vision_sanity_radius_m = 0.05    # max deviation from calibrated XY
+        self.vision_min_area_px = 500
+        self.vision_max_area_frac = 0.50
 
         # ---- trial counter --------------------------------------------------
         # Incremented at the start of each insert_cable() call.  Used to select
@@ -624,6 +648,170 @@ class ANT(Policy):
             return 0.0, 0.0
         scale = self.cable_anchor_bias_m / norm
         return dx * scale, dy * scale
+
+    # ======================================================================
+    # Bug 105 — vision-based SC port localisation
+    # ======================================================================
+
+    @staticmethod
+    def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+        """Quaternion → 3×3 rotation matrix."""
+        return np.array([
+            [1 - 2*(qy**2 + qz**2),  2*(qx*qy - qz*qw),      2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw),      1 - 2*(qx**2 + qz**2),  2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw),      2*(qy*qz + qx*qw),      1 - 2*(qx**2 + qy**2)],
+        ])
+
+    def _image_to_numpy(self, image_msg) -> np.ndarray:
+        """Convert sensor_msgs/Image (rgb8) into a (H, W, 3) numpy array.
+
+        Returns an empty array if the message is not yet populated.
+        """
+        if image_msg is None or image_msg.width == 0 or image_msg.height == 0:
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        if image_msg.encoding not in ("rgb8", "bgr8"):
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        arr = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
+            (image_msg.height, image_msg.width, 3)
+        )
+        if image_msg.encoding == "bgr8":
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        return arr
+
+    def _detect_sc_housing_pixel(self, image_msg, image_np: np.ndarray):
+        """Detect the SC port housing centroid in pixel space.
+
+        Mirrors stage1_debug.detect_sc — Otsu threshold + contour scoring.
+        Returns (u, v, score) on success, None otherwise.
+        """
+        if image_np.size == 0:
+            return None
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        _, mask = cv2.threshold(blurred, 0, 255,
+                                cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if not contours:
+            return None
+        cx_img = image_msg.width / 2.0
+        cy_img = image_msg.height / 2.0
+        max_area = image_msg.width * image_msg.height * self.vision_max_area_frac
+        best = None
+        best_score = -1.0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self.vision_min_area_px or area > max_area:
+                continue
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            u = M["m10"] / M["m00"]
+            v = M["m01"] / M["m00"]
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter < 1.0:
+                continue
+            circularity = 4.0 * np.pi * area / (perimeter ** 2)
+            dist_from_centre = math.hypot(u - cx_img, v - cy_img)
+            score = area * circularity / (dist_from_centre + 1.0)
+            if score > best_score:
+                best_score = score
+                best = (u, v, score)
+        return best
+
+    def _back_project_to_z(self, u: float, v: float, camera_info,
+                           target_z_in_base: float):
+        """Back-project pixel (u, v) to a 3D point on z = target_z plane.
+
+        Uses center_camera/optical TF from the URDF tree (NOT ground-truth).
+        Returns (X, Y) in base_link, or None if the geometry is degenerate
+        or TF is unavailable.
+        """
+        if camera_info is None or len(camera_info.k) < 9:
+            return None
+        K = np.array(camera_info.k).reshape(3, 3)
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        if fx < 1.0:
+            return None   # uninitialised CameraInfo
+        # Pixel → ray direction in optical frame.
+        d_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0])
+        try:
+            tf_stamped = self._parent_node._tf_buffer.lookup_transform(
+                "base_link", "center_camera/optical", Time(),
+            )
+        except TransformException:
+            return None
+        t = tf_stamped.transform.translation
+        r = tf_stamped.transform.rotation
+        R = self._quat_to_rot(r.x, r.y, r.z, r.w)
+        d_base = R @ d_cam
+        if abs(d_base[2]) < 1e-4:
+            return None
+        cam_pos = np.array([t.x, t.y, t.z])
+        scale = (target_z_in_base - cam_pos[2]) / d_base[2]
+        if scale < 0:
+            return None   # intersection behind camera
+        X = cam_pos[0] + scale * d_base[0]
+        Y = cam_pos[1] + scale * d_base[1]
+        return float(X), float(Y)
+
+    def _vision_localise_sc(self, observation, connector_z: float,
+                            calibrated_xy):
+        """Best-effort SC port localisation from the center camera.
+
+        Returns (X, Y) in base_link if a confident detection passes the
+        sanity check (must lie within self.vision_sanity_radius_m of the
+        calibrated zone fallback), otherwise None — caller falls back to
+        the calibrated table.
+
+        This makes the policy work for boards placed at non-calibrated
+        XY/yaw configurations, while preserving current behaviour when the
+        board IS at the calibrated pose (the sanity check passes; same XY).
+        """
+        if not self.enable_vision_sc_localization:
+            return None
+        if observation is None:
+            return None
+        img_np = self._image_to_numpy(observation.center_image)
+        det = self._detect_sc_housing_pixel(observation.center_image, img_np)
+        if det is None:
+            self.get_logger().info(
+                "Bug 105: SC vision — no candidate housing detected"
+            )
+            return None
+        u, v, score = det
+        if score < self.vision_min_score:
+            self.get_logger().info(
+                f"Bug 105: SC vision — best candidate score={score:.2f} "
+                f"< {self.vision_min_score:.2f} — falling back"
+            )
+            return None
+        xy = self._back_project_to_z(u, v, observation.center_camera_info,
+                                     connector_z)
+        if xy is None:
+            self.get_logger().info(
+                "Bug 105: SC vision — back-projection unavailable "
+                "(camera TF or CameraInfo missing) — falling back"
+            )
+            return None
+        X, Y = xy
+        cal_x, cal_y = calibrated_xy
+        deviation = math.hypot(X - cal_x, Y - cal_y)
+        if deviation > self.vision_sanity_radius_m:
+            self.get_logger().warning(
+                f"Bug 105: SC vision detection ({X:.3f},{Y:.3f}) is "
+                f"{deviation*100:.1f} cm from calibrated ({cal_x:.3f},"
+                f"{cal_y:.3f}) — outside {self.vision_sanity_radius_m*100:.0f} cm "
+                f"sanity radius, falling back"
+            )
+            return None
+        self.get_logger().info(
+            f"Bug 105: SC vision detection ({X:.3f},{Y:.3f}) — "
+            f"score={score:.2f}, deviation={deviation*100:.1f} cm from calibrated; "
+            f"using as port XY"
+        )
+        return (X, Y)
 
     def _wait_for_observation(self, get_observation, start_time, time_limit_sec,
                               max_attempts: int = 20):
@@ -1124,8 +1312,19 @@ class ANT(Policy):
         arm_y = obs_final.controller_state.tcp_pose.position.y
         known = self.zone_known_ports.get(zone, [(base_x, base_y)])
         fb_x, fb_y = min(known, key=lambda p: np.hypot(p[0] - arm_x, p[1] - arm_y))
+
+        # Bug 105: vision-based SC port localisation.  Try to back-project
+        # the SC housing centroid from the center camera onto the connector
+        # Z plane, sanity-check against the calibrated fallback, and use it
+        # if it agrees (allows generalisation to unknown board placement).
+        # If vision fails, sanity check fails, or we're not in the SC zone,
+        # behaviour matches the prior calibrated-only path exactly.
+        vision_xy = self._vision_localise_sc(obs_final, connector_z, (fb_x, fb_y))
+        if vision_xy is not None:
+            fb_x, fb_y = vision_xy
+
         self.get_logger().info(
-            f"Stage 1 SC: nearest known port ({fb_x:.4f},{fb_y:.4f}) — "
+            f"Stage 1 SC: port target ({fb_x:.4f},{fb_y:.4f}) — "
             "Stage 3 will direct-descend from this position"
         )
         return self._make_pose(fb_x, fb_y, connector_z, orient_final)

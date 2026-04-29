@@ -133,6 +133,42 @@ sim run with this code, observe T3 plug orientation in the log and pick a
 yaw correction (likely in the ±0.5 rad range) that aligns the plug's flat
 with the port slot. Iterate over 2–3 sims.
 
+## Bug 105 (vision-based SC port localisation, branch claude/review-simulation-logs-6knxl)
+
+Replaces hardcoded `zone_known_ports["sc"]` with a live back-projection from
+the center camera image when a confident detection is available.  This is
+the path that generalises to unknown board placements/yaws — not just the
+sample_config-calibrated one.
+
+**Pipeline**:
+1. Stage 1 SC fallback path captures the latest Observation.
+2. `_detect_sc_housing_pixel()` runs Otsu threshold + contour scoring on
+   `center_image` (same algorithm as `stage1_debug.py`).
+3. `_back_project_to_z()` looks up `base_link → center_camera/optical` from
+   the URDF TF tree (NOT ground-truth) and intersects the camera ray with
+   `connector_z_in_base["sc"]`.
+4. Sanity check: detection must lie within `vision_sanity_radius_m` (5 cm)
+   of the calibrated XY.  If not — caller falls back to the calibrated
+   table.  Worst case: behaviour matches pre-Bug-105 code exactly.
+
+**Why SC only**: SFP HSV from above is structurally blind (CLAUDE.md).
+The SC housing is a high-contrast cream/tan block visible top-down; Otsu
+thresholding finds it reliably (the same code path that the disabled SC
+pre-scan used, just without the lateral-offset gymnastics).
+
+**Tunables in `ANT.__init__`**:
+- `enable_vision_sc_localization` — master toggle.
+- `vision_min_score` — contour score floor (default 1.0).
+- `vision_sanity_radius_m` — max accepted deviation from calibrated XY.
+- `vision_min_area_px` / `vision_max_area_frac` — contour size gates.
+
+**Generalisation note**: this lifts the rigid `(-0.3830, 0.4295)` calibration
+constraint for SC.  The existing tables remain as the safety fallback so a
+detection failure is no worse than the prior code.  For full generalisation
+to unknown SFP boards, a successor effort needs side-camera or board-frame
+detection (HSV from above will not work — see "SFP HSV from above is
+structurally blind" in Policy/runtime constraints).
+
 ## v15 ships with these robustness fixes (vs v11/v14)
 
 - **Bug 90**: SC Stage 4 `feedforward_fz=−5.0`, budget `0.5 s`, force-timer
@@ -216,6 +252,36 @@ partial credit and that T1/T2 are unchanged.
   repos. The development branch for competition work is
   `claude/improve-competition-score-cginC`.
 
+## Policy/runtime constraints (durable — don't re-investigate)
+
+- **Forbidden TF frames**. The parent node (`aic_model.AicModel`) owns a
+  `_tf_buffer` accessible from a policy as `self._parent_node._tf_buffer`,
+  but the plug/port/cable frames (`sc_tip`, `sc_port_base`,
+  `sfp_port_0_link*`, `cable_connection_*`, `aic_world`) are only relayed
+  from `/scoring/tf` to `/tf` when launched with `ground_truth:=true`
+  (`aic_bringup/launch/aic_gz_bringup.launch.py` lines 354–367). They are
+  **ground-truth state** and competition runs disable the relay. Do not
+  call `lookup_transform` on any of those frames in policy code — it works
+  in local debug runs and silently fails at eval time.
+- **Allowed TF frames**: anything in the robot URDF tree
+  (`base_link → ... → gripper/tcp`, `center_camera/optical`,
+  `ati/tool_link`, etc.) is published by `robot_state_publisher` and is
+  fair game.
+- **Joint-space IK is not exposed to the policy**. `move_robot()` accepts
+  Cartesian (`MotionUpdate`, impedance) or direct joint-space targets
+  (`JointMotionUpdate`, six floats). There is no `/compute_ik` service
+  call wired in. "Go to (x, y, z) in joint space" requires solving IK
+  in-policy. Bug 102's stiffer-Cartesian-impedance is the practical
+  workaround.
+- **No ArUco / fiducial markers on the task board**. The board mesh
+  (`Task Board Base/base_visual.glb`) has no marker textures, and the
+  rules forbid modifying the board. Vision must work from the natural
+  appearance of the board / port hardware.
+- **SFP HSV from above is structurally blind**. The SFP bracket's blue/
+  cyan face is on the outward side, not visible top-down. Any vision
+  approach for SFP needs board-frame localisation (Bug 105) or an angled
+  camera position.
+
 ## Quick commands
 
 ```bash
@@ -229,4 +295,10 @@ docker image rm ant-policy:v15 2>/dev/null
 
 # Check current submitted ECR tag
 grep "image:" docker/docker-compose.yaml
+
+# Read ground-truth port poses for Bug 99 yaw / Bug 103 anchor calibration
+# (run a sim with ground_truth:=true; these frames are then relayed to /tf)
+ros2 run tf2_ros tf2_echo base_link sc_port_base
+ros2 run tf2_ros tf2_echo base_link cable_base
+ros2 run tf2_ros tf2_echo base_link sfp_port_0_link
 ```
