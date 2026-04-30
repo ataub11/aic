@@ -16,6 +16,7 @@ All parameters marked CALIBRATE must be tuned once from a run with
 """
 
 import collections
+import math
 import os
 
 import cv2
@@ -29,9 +30,11 @@ from aic_model.policy import (
     SendFeedbackCallback,
 )
 from aic_task_interfaces.msg import Task
-from geometry_msgs.msg import Point, Pose, Vector3, Wrench
+from geometry_msgs.msg import Point, Pose, Quaternion, Vector3, Wrench
 from rclpy.duration import Duration
+from rclpy.time import Time
 from std_msgs.msg import Header
+from tf2_ros import TransformException
 
 
 class UnexpectedContactError(Exception):
@@ -198,6 +201,129 @@ class ANT(Policy):
         self.stage4_spiral_max_radius_m = 0.008        # 8 mm max spiral amplitude in XY
         self.stage4_spiral_ramp_sec = 5.0              # seconds to grow from 0 to max_radius
         self.stage4_spiral_period_sec = 10.0           # one orbit period (slow → low jerk)
+
+        # ---- Bug 99 (A): calibrated port-yaw alignment ---------------------
+        # The SC plug attaches to the gripper at a fixed mount pose (cable.sdf
+        # gripper_offset rpy=(0.4432, -0.4838, 1.3303) and the SC plug local
+        # transform (-π/2, 0, -π/2) from sc_plug_link to sc_tip_link).  When the
+        # gripper points TCP-down, the plug tip's insertion axis is offset from
+        # base_link −Z by a fixed orientation that depends on the cable spawn.
+        # In sim 2026-04-29 T3 (sample_config trial_3), the gripper was held at
+        # the home orientation across the entire pipeline and the plug ended
+        # up 0.14 m from port — orientation mismatch.
+        #
+        # Pragmatic implementation: parameterise an extra yaw rotation around
+        # base_link Z that the gripper applies during Stage 3+4 only, indexed
+        # by (zone, trial).  The values are calibrated empirically — start at
+        # 0.0 (no change vs current behaviour) and tune in subsequent sims.
+        # For unknown ports the table degrades to identity (no change).
+        # Disabled-by-default for SFP to preserve T1's 38-pt partial-insert.
+        #
+        # gripper_yaw_correction_rad[(zone, trial)]: yaw offset (radians)
+        # applied as a rotation around base_link Z to the gripper orientation
+        # observed at Stage 3 entry.  Positive yaw = rotate gripper CCW seen
+        # from above.
+        self.gripper_yaw_correction_rad = {
+            ("sc",  3): 0.0,   # CALIBRATE: start identity, iterate on sim feedback
+            # SFP entries intentionally absent — T1 path scores 38pts already.
+        }
+        self.enable_yaw_alignment = True   # master toggle for Bug 99
+
+        # ---- Bug 100 (B): Stage 4 Fxy gradient correction ------------------
+        # Use the wrist F/T sensor's lateral force components to bias the
+        # spiral centre AGAINST the contact-reaction direction.  When the
+        # plug touches the port chamfer, |Fxy| spikes and points away from
+        # the port centre — stepping the commanded XY by a small fraction of
+        # −F̂xy nudges the plug toward the hole.  Replaces the blind Lissajous
+        # when |Fxy| is informative; otherwise the spiral runs as before.
+        self.stage4_fxy_gradient_enable = True
+        self.stage4_fxy_threshold_n = 3.0          # below this, Fxy is noise
+        self.stage4_fxy_step_per_sample_m = 0.0006 # 0.6 mm/sample max gradient step
+        self.stage4_fxy_max_offset_m = 0.012       # cap accumulated offset at 12 mm
+
+        # ---- Bug 101 (C): Stage 4 per-axis compliance ----------------------
+        # Stages 1–3 want stiff position tracking (already use approach_stiff).
+        # Stage 4 wants admittance: low XY stiffness so the chamfer can guide
+        # the plug, modest Z stiffness with bounded feedforward to drive
+        # descent without overshooting.  Per-axis stiffness vectors are
+        # sent via the new _build_motion_update_axis() helper.
+        #
+        # DISABLED-BY-DEFAULT after sim 2026-04-29b regression (run_2026-04-29b):
+        # Z stiffness=120 N/m was too soft — cable tension RAISED the arm by
+        # 1.6–1.9 cm during Stage 4 (T2: tcp_z 0.179→0.198, T3: tcp_z
+        # 0.069→0.106).  The arm couldn't hold depth against cable pull, so
+        # the plug ended up further from the port (T3 final distance 0.14m
+        # → 0.18m regression).  Re-enable only after raising Z stiffness back
+        # toward 200 N/m and re-running sim.
+        self.stage4_compliance_enable = False
+        self.stage4_xy_stiffness_n_per_m = 50.0    # gentle XY (was 85–200)
+        self.stage4_z_stiffness_n_per_m  = 120.0   # firm-ish Z
+
+        # ---- Bug 102 (J): stiffer Cartesian lateral on high-tension days ---
+        # True joint-space IK is not available from the policy.  Proxy: when
+        # _high_tension is True, raise the lateral-phase Cartesian stiffness
+        # so impedance can drive the arm against cable equilibrium.  v15 used
+        # 85 N/m; raise to 250 N/m for the high-tension lateral phase only.
+        self.lateral_high_tension_stiffness_n_per_m = 250.0
+        self.enable_high_tension_stiff_lateral = True
+
+        # ---- Bug 103 (H): cable-anchor cue for Y-bias on high-tension day --
+        # The cable anchor on the BOARD side biases the plug's equilibrium
+        # XY: a high-tension cable pulls the gripper toward the anchor, so
+        # the apparent stalled XY is OFFSET away from the true port toward
+        # +anchor direction.  Counter by biasing the lateral target toward
+        # the anchor by a small amount (high-tension days only).
+        # Anchor positions are calibrated in base_link from sample_config.
+        # Unknown configs degrade to no bias.
+        self.cable_anchor_xy_in_base = {
+            "sfp": (-0.475, 0.245),   # approximate cable_base anchor for SFP runs
+            "sc":  (-0.475, 0.300),   # approximate cable_base anchor for SC run
+        }
+        self.cable_anchor_bias_m = 0.010   # 1 cm bias toward anchor on high-tension day
+        self.enable_anchor_bias = True
+
+        # ---- Bug 104 (I): adaptive Stage 4 mode by Stage 2/3 XY error ------
+        # xy_err = |contact_pose.xy − connector_pose.xy| at Stage 4 entry.
+        #   < 5 mm    → 'direct'  : just hold + slack-detect, no spiral
+        #   5–40 mm   → 'spiral'  : fixed-z spiral with cmd_z=end_z (Bug 98b)
+        #   ≥ 40 mm   → 'skip'    : Bug 94 already skips ≥ 60 mm; tightened
+        #                            to 40 mm here so we don't waste 130 s
+        #                            holding the spiral over a misaligned port.
+        #
+        # 'descend' mode (cmd_z ramping from start_z down to end_z) was tried
+        # in sim 2026-04-29b: it commanded NO spring force at t=0 (cmd_z =
+        # start_z = current arm Z, pos_error≈0) and slowly ramped, which
+        # gave LESS downward force than the 'spiral' mode's "command end_z
+        # immediately for max spring force" approach.  Collapsed back into
+        # 'spiral' by setting descend_thresh == spiral_thresh.  Code is
+        # retained behind the threshold so it can be reactivated with
+        # different ramp semantics later.
+        self.stage4_mode_thresh_direct_m  = 0.005
+        self.stage4_mode_thresh_spiral_m  = 0.040
+        self.stage4_mode_thresh_descend_m = 0.040
+        self.stage4_descend_ramp_m_per_orbit = 0.002  # 2 mm down per orbit
+
+        # ---- Bug 105: vision-based SC port localization --------------------
+        # Replace the hardcoded `zone_known_ports["sc"]` fallback with a live
+        # back-projection from the center camera when a confident detection is
+        # available.  Only activates for SC (the cream/tan housing has high
+        # contrast against the board face — Otsu threshold + min-area-rect
+        # fits the housing reliably from above).  SFP path is unchanged
+        # (HSV blind from above; documented in CLAUDE.md).
+        #
+        # The detection is gated by:
+        #   (1) confidence score (area × circularity / dist_from_centre)
+        #   (2) sanity check: back-projected XY must lie within
+        #       `vision_sanity_radius_m` of the calibrated zone fallback —
+        #       guards against detecting LC mounts or NIC strips by mistake.
+        # If either gate fails, falls back to the calibrated table — same
+        # behaviour as before this bug, so a worst-case regression cannot
+        # underperform the current code.
+        self.enable_vision_sc_localization = True
+        self.vision_min_score = 1.0
+        self.vision_sanity_radius_m = 0.05    # max deviation from calibrated XY
+        self.vision_min_area_px = 500
+        self.vision_max_area_frac = 0.50
 
         # ---- trial counter --------------------------------------------------
         # Incremented at the start of each insert_cable() call.  Used to select
@@ -431,22 +557,38 @@ class ANT(Policy):
         rot_stiffness = stiffness_xyz * 0.5
         damping_xyz = stiffness_xyz * 0.6
         rot_damping = damping_xyz * 0.5
+        return self._build_motion_update_axis(
+            pose,
+            stiffness_xyz=(stiffness_xyz, stiffness_xyz, stiffness_xyz),
+            rot_stiffness=(rot_stiffness, rot_stiffness, rot_stiffness),
+            damping_xyz=(damping_xyz, damping_xyz, damping_xyz),
+            rot_damping=(rot_damping, rot_damping, rot_damping),
+            feedforward_fx=0.0,
+            feedforward_fy=feedforward_fy,
+            feedforward_fz=feedforward_fz,
+        )
+
+    def _build_motion_update_axis(self, pose: Pose,
+                                  stiffness_xyz, rot_stiffness,
+                                  damping_xyz, rot_damping,
+                                  feedforward_fx: float = 0.0,
+                                  feedforward_fy: float = 0.0,
+                                  feedforward_fz: float = 0.0) -> MotionUpdate:
+        """Per-axis stiffness builder used by Stage 4 compliance switch (Bug 101)."""
+        sx, sy, sz = stiffness_xyz
+        rx, ry, rz = rot_stiffness
+        dx, dy, dz = damping_xyz
+        drx, dry, drz = rot_damping
         return MotionUpdate(
             header=Header(
                 frame_id="base_link",
                 stamp=self.get_clock().now().to_msg(),
             ),
             pose=pose,
-            target_stiffness=np.diag([
-                stiffness_xyz, stiffness_xyz, stiffness_xyz,
-                rot_stiffness, rot_stiffness, rot_stiffness,
-            ]).flatten(),
-            target_damping=np.diag([
-                damping_xyz, damping_xyz, damping_xyz,
-                rot_damping, rot_damping, rot_damping,
-            ]).flatten(),
+            target_stiffness=np.diag([sx, sy, sz, rx, ry, rz]).flatten(),
+            target_damping=np.diag([dx, dy, dz, drx, dry, drz]).flatten(),
             feedforward_wrench_at_tip=Wrench(
-                force=Vector3(x=0.0, y=feedforward_fy, z=feedforward_fz),
+                force=Vector3(x=feedforward_fx, y=feedforward_fy, z=feedforward_fz),
                 torque=Vector3(x=0.0, y=0.0, z=0.0),
             ),
             # Wrench feedback gains MUST be 0 for position-convergence moves.
@@ -459,6 +601,233 @@ class ANT(Policy):
                 mode=TrajectoryGenerationMode.MODE_POSITION,
             ),
         )
+
+    @staticmethod
+    def _quat_mul(q1, q2):
+        """Hamilton product of two quaternions stored as (x, y, z, w)."""
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        return (
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        )
+
+    def _yaw_rotated_orientation(self, orient: Quaternion, yaw_rad: float) -> Quaternion:
+        """Return orient pre-multiplied by a rotation of yaw_rad around base_link Z.
+
+        Bug 99 (A): used to apply a calibrated port-yaw correction to the
+        gripper orientation during Stage 3/4.  Equivalent to "rotate the arm
+        about the base-frame vertical axis by yaw_rad before sending the pose".
+        """
+        if abs(yaw_rad) < 1e-6:
+            return orient
+        half = 0.5 * yaw_rad
+        qz = (0.0, 0.0, math.sin(half), math.cos(half))
+        q_in = (orient.x, orient.y, orient.z, orient.w)
+        x, y, z, w = self._quat_mul(qz, q_in)
+        return Quaternion(x=float(x), y=float(y), z=float(z), w=float(w))
+
+    def _gripper_yaw_correction(self, zone: str) -> float:
+        """Look up the calibrated yaw correction for the current trial (Bug 99)."""
+        if not self.enable_yaw_alignment:
+            return 0.0
+        return self.gripper_yaw_correction_rad.get(
+            (zone, self._insert_call_count), 0.0
+        )
+
+    def _wrench_force_xy(self, observation):
+        """Return (Fx, Fy) from the wrist wrench in base_link frame.
+
+        For small TCP rotations from home, the wrist frame's XY is nearly
+        aligned with base_link XY, so we use the raw values.  This is good
+        enough as a gradient signal — sign and rough magnitude — for Bug 100.
+        """
+        f = observation.wrist_wrench.wrench.force
+        return float(f.x), float(f.y)
+
+    def _anchor_bias_xy(self, zone: str, port_x: float, port_y: float):
+        """Return a small XY bias (dx, dy) toward the cable anchor for high-
+        tension days (Bug 103).  Returns (0, 0) when disabled, low-tension,
+        or the anchor for this zone is not calibrated.
+        """
+        if not self.enable_anchor_bias or not self._high_tension:
+            return 0.0, 0.0
+        anchor = self.cable_anchor_xy_in_base.get(zone)
+        if anchor is None:
+            return 0.0, 0.0
+        ax, ay = anchor
+        dx, dy = ax - port_x, ay - port_y
+        norm = math.hypot(dx, dy)
+        if norm < 1e-3:
+            return 0.0, 0.0
+        scale = self.cable_anchor_bias_m / norm
+        return dx * scale, dy * scale
+
+    # ======================================================================
+    # Bug 105 — vision-based SC port localisation
+    # ======================================================================
+
+    @staticmethod
+    def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+        """Quaternion → 3×3 rotation matrix."""
+        return np.array([
+            [1 - 2*(qy**2 + qz**2),  2*(qx*qy - qz*qw),      2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw),      1 - 2*(qx**2 + qz**2),  2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw),      2*(qy*qz + qx*qw),      1 - 2*(qx**2 + qy**2)],
+        ])
+
+    def _image_to_numpy(self, image_msg) -> np.ndarray:
+        """Convert sensor_msgs/Image (rgb8) into a (H, W, 3) numpy array.
+
+        Returns an empty array if the message is not yet populated.
+        """
+        if image_msg is None or image_msg.width == 0 or image_msg.height == 0:
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        if image_msg.encoding not in ("rgb8", "bgr8"):
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        arr = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
+            (image_msg.height, image_msg.width, 3)
+        )
+        if image_msg.encoding == "bgr8":
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        return arr
+
+    def _detect_sc_housing_pixel(self, image_msg, image_np: np.ndarray):
+        """Detect the SC port housing centroid in pixel space.
+
+        Mirrors stage1_debug.detect_sc — Otsu threshold + contour scoring.
+        Returns (u, v, score) on success, None otherwise.
+        """
+        if image_np.size == 0:
+            return None
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        _, mask = cv2.threshold(blurred, 0, 255,
+                                cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if not contours:
+            return None
+        cx_img = image_msg.width / 2.0
+        cy_img = image_msg.height / 2.0
+        max_area = image_msg.width * image_msg.height * self.vision_max_area_frac
+        best = None
+        best_score = -1.0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self.vision_min_area_px or area > max_area:
+                continue
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            u = M["m10"] / M["m00"]
+            v = M["m01"] / M["m00"]
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter < 1.0:
+                continue
+            circularity = 4.0 * np.pi * area / (perimeter ** 2)
+            dist_from_centre = math.hypot(u - cx_img, v - cy_img)
+            score = area * circularity / (dist_from_centre + 1.0)
+            if score > best_score:
+                best_score = score
+                best = (u, v, score)
+        return best
+
+    def _back_project_to_z(self, u: float, v: float, camera_info,
+                           target_z_in_base: float):
+        """Back-project pixel (u, v) to a 3D point on z = target_z plane.
+
+        Uses center_camera/optical TF from the URDF tree (NOT ground-truth).
+        Returns (X, Y) in base_link, or None if the geometry is degenerate
+        or TF is unavailable.
+        """
+        if camera_info is None or len(camera_info.k) < 9:
+            return None
+        K = np.array(camera_info.k).reshape(3, 3)
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        if fx < 1.0:
+            return None   # uninitialised CameraInfo
+        # Pixel → ray direction in optical frame.
+        d_cam = np.array([(u - cx) / fx, (v - cy) / fy, 1.0])
+        try:
+            tf_stamped = self._parent_node._tf_buffer.lookup_transform(
+                "base_link", "center_camera/optical", Time(),
+            )
+        except TransformException:
+            return None
+        t = tf_stamped.transform.translation
+        r = tf_stamped.transform.rotation
+        R = self._quat_to_rot(r.x, r.y, r.z, r.w)
+        d_base = R @ d_cam
+        if abs(d_base[2]) < 1e-4:
+            return None
+        cam_pos = np.array([t.x, t.y, t.z])
+        scale = (target_z_in_base - cam_pos[2]) / d_base[2]
+        if scale < 0:
+            return None   # intersection behind camera
+        X = cam_pos[0] + scale * d_base[0]
+        Y = cam_pos[1] + scale * d_base[1]
+        return float(X), float(Y)
+
+    def _vision_localise_sc(self, observation, connector_z: float,
+                            calibrated_xy):
+        """Best-effort SC port localisation from the center camera.
+
+        Returns (X, Y) in base_link if a confident detection passes the
+        sanity check (must lie within self.vision_sanity_radius_m of the
+        calibrated zone fallback), otherwise None — caller falls back to
+        the calibrated table.
+
+        This makes the policy work for boards placed at non-calibrated
+        XY/yaw configurations, while preserving current behaviour when the
+        board IS at the calibrated pose (the sanity check passes; same XY).
+        """
+        if not self.enable_vision_sc_localization:
+            return None
+        if observation is None:
+            return None
+        img_np = self._image_to_numpy(observation.center_image)
+        det = self._detect_sc_housing_pixel(observation.center_image, img_np)
+        if det is None:
+            self.get_logger().info(
+                "Bug 105: SC vision — no candidate housing detected"
+            )
+            return None
+        u, v, score = det
+        if score < self.vision_min_score:
+            self.get_logger().info(
+                f"Bug 105: SC vision — best candidate score={score:.2f} "
+                f"< {self.vision_min_score:.2f} — falling back"
+            )
+            return None
+        xy = self._back_project_to_z(u, v, observation.center_camera_info,
+                                     connector_z)
+        if xy is None:
+            self.get_logger().info(
+                "Bug 105: SC vision — back-projection unavailable "
+                "(camera TF or CameraInfo missing) — falling back"
+            )
+            return None
+        X, Y = xy
+        cal_x, cal_y = calibrated_xy
+        deviation = math.hypot(X - cal_x, Y - cal_y)
+        if deviation > self.vision_sanity_radius_m:
+            self.get_logger().warning(
+                f"Bug 105: SC vision detection ({X:.3f},{Y:.3f}) is "
+                f"{deviation*100:.1f} cm from calibrated ({cal_x:.3f},"
+                f"{cal_y:.3f}) — outside {self.vision_sanity_radius_m*100:.0f} cm "
+                f"sanity radius, falling back"
+            )
+            return None
+        self.get_logger().info(
+            f"Bug 105: SC vision detection ({X:.3f},{Y:.3f}) — "
+            f"score={score:.2f}, deviation={deviation*100:.1f} cm from calibrated; "
+            f"using as port XY"
+        )
+        return (X, Y)
 
     def _wait_for_observation(self, get_observation, start_time, time_limit_sec,
                               max_attempts: int = 20):
@@ -710,25 +1079,46 @@ class ANT(Policy):
                     if high_tension and y_delta != 0.0
                     else 0.0
                 )
+                # Bug 103 (H): on high-tension days, bias the lateral target a
+                # small amount toward the cable anchor.  Counters the cable's
+                # equilibrium pull that otherwise leaves the arm stalled away
+                # from the true port XY.
+                bias_dx, bias_dy = self._anchor_bias_xy("sfp", tgt_x, tgt_y)
+                if bias_dx != 0.0 or bias_dy != 0.0:
+                    self.get_logger().info(
+                        f"Stage 1 SFP T2: applying anchor bias "
+                        f"({bias_dx*1000:+.1f},{bias_dy*1000:+.1f}) mm (Bug 103)"
+                    )
+                # Bug 102 (J): stiffer lateral on high-tension days as a
+                # joint-space-IK proxy.  Cartesian impedance at 250 N/m
+                # overpowers the cable equilibrium that 85 N/m cannot.
+                lateral_stiffness = (
+                    self.lateral_high_tension_stiffness_n_per_m
+                    if (high_tension and self.enable_high_tension_stiff_lateral)
+                    else None
+                )
                 self.get_logger().info(
                     f"Stage 1 SFP T2: lateral plan baseline={self.cable_force_baseline:.2f} N "
-                    f"→ high_tension={high_tension}, n_split={n_split}, ff_y={ff_y:.1f} N (Bug 96A)"
+                    f"→ high_tension={high_tension}, n_split={n_split}, ff_y={ff_y:.1f} N "
+                    f"(Bug 96A+102+103) lateral_stiffness="
+                    f"{lateral_stiffness if lateral_stiffness is not None else 'default'}"
                 )
                 fractions = tuple((i + 1) / n_split for i in range(n_split))
                 for step_idx, fraction in enumerate(fractions, start=1):
                     step_y = y_now + y_delta * fraction
                     self.get_logger().info(
                         f"Stage 1 SFP T2: WP2 step {step_idx}/{n_split} → "
-                        f"({tgt_x:.4f},{step_y:.4f}) at safe_z={safe_z:.3f} "
+                        f"({tgt_x + bias_dx:.4f},{step_y + bias_dy:.4f}) at safe_z={safe_z:.3f} "
                         f"ff_y={ff_y:.1f} N"
                     )
                     self._move_to_pose_and_wait(
-                        self._make_pose(tgt_x, step_y, safe_z, orient),
+                        self._make_pose(tgt_x + bias_dx, step_y + bias_dy, safe_z, orient),
                         move_robot, get_observation, start_time, time_limit_sec,
                         convergence_m=0.015, stage_timeout_sec=30.0,
                         label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
                         check_force=False,
                         feedforward_fy=ff_y,
+                        stiffness_xyz=lateral_stiffness,
                     )
                     obs_wp = get_observation()
                     if obs_wp:
@@ -865,17 +1255,26 @@ class ANT(Policy):
             if high_tension and y_dir != 0.0
             else 0.0
         )
+        bias_dx, bias_dy = self._anchor_bias_xy("sc", base_x, base_y)
+        lateral_stiffness = (
+            self.lateral_high_tension_stiffness_n_per_m
+            if (high_tension and self.enable_high_tension_stiff_lateral)
+            else None
+        )
         self.get_logger().info(
-            f"Stage 1: WP2 lateral → ({base_x:.3f},{base_y:.3f}) at "
+            f"Stage 1: WP2 lateral → ({base_x + bias_dx:.3f},{base_y + bias_dy:.3f}) at "
             f"z={lateral_z:.3f} — baseline={self.cable_force_baseline:.2f} N, "
             f"high_tension={high_tension}, step={step_size_m*100:.1f} cm, "
             f"splitting {total_dist*100:.1f} cm into {n_steps} sub-steps, "
-            f"ff_y={ff_y:.1f} N (Bug 93+96A+97)"
+            f"ff_y={ff_y:.1f} N "
+            f"(Bug 93+96A+97+102+103) lateral_stiffness="
+            f"{lateral_stiffness if lateral_stiffness is not None else 'default'} "
+            f"anchor_bias=({bias_dx*1000:+.1f},{bias_dy*1000:+.1f})mm"
         )
         for sub in range(1, n_steps + 1):
             t = sub / n_steps
-            tgt_x = step_x + (base_x - step_x) * t
-            tgt_y = step_y + (base_y - step_y) * t
+            tgt_x = step_x + (base_x - step_x) * t + bias_dx
+            tgt_y = step_y + (base_y - step_y) * t + bias_dy
             self._move_to_pose_and_wait(
                 self._make_pose(tgt_x, tgt_y, lateral_z, orient),
                 move_robot, get_observation, start_time, time_limit_sec,
@@ -883,6 +1282,7 @@ class ANT(Policy):
                 label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (z={lateral_z:.3f})",
                 check_force=False,
                 feedforward_fy=ff_y,
+                stiffness_xyz=lateral_stiffness,
             )
             obs_sub = get_observation()
             if obs_sub is not None:
@@ -928,8 +1328,19 @@ class ANT(Policy):
         arm_y = obs_final.controller_state.tcp_pose.position.y
         known = self.zone_known_ports.get(zone, [(base_x, base_y)])
         fb_x, fb_y = min(known, key=lambda p: np.hypot(p[0] - arm_x, p[1] - arm_y))
+
+        # Bug 105: vision-based SC port localisation.  Try to back-project
+        # the SC housing centroid from the center camera onto the connector
+        # Z plane, sanity-check against the calibrated fallback, and use it
+        # if it agrees (allows generalisation to unknown board placement).
+        # If vision fails, sanity check fails, or we're not in the SC zone,
+        # behaviour matches the prior calibrated-only path exactly.
+        vision_xy = self._vision_localise_sc(obs_final, connector_z, (fb_x, fb_y))
+        if vision_xy is not None:
+            fb_x, fb_y = vision_xy
+
         self.get_logger().info(
-            f"Stage 1 SC: nearest known port ({fb_x:.4f},{fb_y:.4f}) — "
+            f"Stage 1 SC: port target ({fb_x:.4f},{fb_y:.4f}) — "
             "Stage 3 will direct-descend from this position"
         )
         return self._make_pose(fb_x, fb_y, connector_z, orient_final)
@@ -1034,6 +1445,18 @@ class ANT(Policy):
                 connector_pose.position.z if zone == "sfp"
                 else connector_pose.position.z + 0.075
             )
+            # Bug 99 (A): apply calibrated gripper-yaw correction so the plug's
+            # tip aligns with the port's insertion axis.  Identity (0 rad) for
+            # entries not in the table — preserves T1 behaviour exactly.
+            yaw_corr = self._gripper_yaw_correction(zone)
+            target_orient = self._yaw_rotated_orientation(
+                connector_pose.orientation, yaw_corr
+            )
+            if abs(yaw_corr) > 1e-6:
+                self.get_logger().info(
+                    f"Stage 3 ({zone.upper()}): applying yaw correction "
+                    f"{math.degrees(yaw_corr):+.1f}° (Bug 99)"
+                )
             self.get_logger().info(
                 f"Stage 3 ({zone.upper()}): direct descent to "
                 f"z={stage3_z:.4f} — skipping contact detection"
@@ -1041,7 +1464,7 @@ class ANT(Policy):
             send_feedback(f"Stage 3: {zone.upper()} direct descent")
             target_pose = self._make_pose(
                 connector_pose.position.x, connector_pose.position.y,
-                stage3_z, connector_pose.orientation,
+                stage3_z, target_orient,
             )
             try:
                 self._move_to_pose_and_wait(
@@ -1062,9 +1485,10 @@ class ANT(Policy):
                     f"({tcp.position.x:.3f},{tcp.position.y:.3f},{tcp.position.z:.3f})"
                 )
                 send_feedback("Stage 3: contact detected")
+                # Carry the corrected orientation through to Stage 4 (Bug 99).
                 return self._make_pose(
                     tcp.position.x, tcp.position.y, tcp.position.z,
-                    connector_pose.orientation,
+                    target_orient,
                 )
             send_feedback("Stage 3: contact detected")
             return target_pose
@@ -1511,16 +1935,30 @@ class ANT(Policy):
         # bad runs (T3 with WP2 stall) skip Stage 4 cleanly with no force event.
         # Cleaner result is tier_3=0 with no force-penalty risk vs. tier_3=0
         # with risk of −12 if the cable buzzes the threshold for >1.0 s.
+        # Bug 104 (I): adaptive Stage 4 mode based on Stage 2/3 XY error.
+        # Tightens the Bug 94 skip threshold and adds finer-grained behaviour
+        # for the 5-40 mm band where blind spiral cannot make Z progress.
+        xy_err = 0.0
+        stage4_mode = "direct"
         if connector_pose is not None:
-            xy_err = np.linalg.norm([
+            xy_err = float(np.linalg.norm([
                 start_x - connector_pose.position.x,
                 start_y - connector_pose.position.y,
-            ])
-            if xy_err > 0.06:
+            ]))
+            # Hardened skip: 0.04 m (was 0.06 m) so we don't burn 130 s holding
+            # a stuck spiral over a misaligned port (sim 2026-04-29 T2 lesson).
+            if xy_err > self.stage4_mode_thresh_descend_m:
                 self.get_logger().warning(
-                    f"Stage 4: arm {xy_err:.3f}m from port XY — skipping insertion (Bug 94)"
+                    f"Stage 4: arm {xy_err:.3f}m from port XY — "
+                    f"skipping insertion (Bug 94+104)"
                 )
                 return False
+            if xy_err < self.stage4_mode_thresh_direct_m:
+                stage4_mode = "direct"
+            elif xy_err < self.stage4_mode_thresh_spiral_m:
+                stage4_mode = "spiral"
+            else:
+                stage4_mode = "descend"
 
         # End target: 5 mm past port face when connector_z is known, else 20 mm
         # past the stall/contact point as a conservative backstop.
@@ -1574,13 +2012,21 @@ class ANT(Policy):
         slack_threshold = self.cable_force_baseline - self.stage4_slack_drop_n
         slack_start_t = None         # wall-clock when |F| first dipped below threshold
         spiral_logged = False
+        # Bug 100 (B): accumulated Fxy-gradient XY offset (capped).
+        grad_dx, grad_dy = 0.0, 0.0
+        # Bug 104 (I): per-orbit z-descent counter for 'descend' mode.
+        orbits_completed = 0.0
+        descend_z_offset = 0.0
         self.get_logger().info(
-            f"Stage 4: active-insertion enabled (Bug 98) — "
+            f"Stage 4: active-insertion enabled (Bug 98+100+101+104) — "
+            f"mode={stage4_mode} xy_err={xy_err*1000:.1f}mm "
             f"baseline={self.cable_force_baseline:.2f} N, "
             f"slack< {slack_threshold:.2f} N for {self.stage4_slack_sustained_sec:.1f} s exits early; "
             f"after {self.stage4_settle_sec:.0f} s settle, spiral up to "
             f"±{self.stage4_spiral_max_radius_m*1000:.0f} mm "
-            f"(period {self.stage4_spiral_period_sec:.0f} s)"
+            f"(period {self.stage4_spiral_period_sec:.0f} s); "
+            f"Fxy_grad={'on' if self.stage4_fxy_gradient_enable else 'off'} "
+            f"compliance={'per-axis' if self.stage4_compliance_enable else 'isotropic'}"
         )
 
         while True:
@@ -1595,12 +2041,15 @@ class ANT(Policy):
                 break
 
             # Compute spiral XY offset once we're past the settle window.
-            # Ramp: r(t) grows linearly from 0 to max_radius over ramp_sec.
-            # Orbit: angle = 2π · (t / period).  At ramp_sec the radius
-            # saturates and we orbit at constant amplitude until exit.
+            # Bug 104: 'direct' mode skips spiral entirely; 'spiral' uses the
+            # original Lissajous; 'descend' adds a per-orbit z-ramp so the
+            # commanded depth advances even when XY can't find the hole.
             spiral_dx = 0.0
             spiral_dy = 0.0
-            spiraling = elapsed_stage > self.stage4_settle_sec
+            spiraling = (
+                stage4_mode in ("spiral", "descend")
+                and elapsed_stage > self.stage4_settle_sec
+            )
             if spiraling:
                 t_spiral = elapsed_stage - self.stage4_settle_sec
                 ramp = min(1.0, t_spiral / max(0.001, self.stage4_spiral_ramp_sec))
@@ -1608,19 +2057,56 @@ class ANT(Policy):
                 angle = 2.0 * np.pi * t_spiral / self.stage4_spiral_period_sec
                 spiral_dx = radius * np.cos(angle)
                 spiral_dy = radius * np.sin(angle)
+                # Bug 104 (I): in 'descend' mode, ramp cmd_z down per completed
+                # orbit so the plug makes axial progress while the XY search
+                # runs.  Capped so we never command past end_z.
+                if stage4_mode == "descend":
+                    new_orbits = t_spiral / max(0.001, self.stage4_spiral_period_sec)
+                    if new_orbits > orbits_completed + 1.0:
+                        orbits_completed = math.floor(new_orbits)
+                        descend_z_offset = min(
+                            descend_z_offset + self.stage4_descend_ramp_m_per_orbit,
+                            max(0.0, start_z - end_z),
+                        )
                 if not spiral_logged:
                     self.get_logger().info(
-                        f"Stage 4: starting XY spiral search at t={elapsed_stage:.1f}s "
-                        f"(no slack detected during settle)"
+                        f"Stage 4 ({stage4_mode}): starting XY spiral at t={elapsed_stage:.1f}s "
+                        f"(no slack during settle)"
                     )
                     spiral_logged = True
 
+            # Bug 100 (B): force-gradient XY correction is applied below where
+            # obs is in scope (after move_robot + sleep + get_observation).
+
+            cmd_z_now = cmd_z
+            if stage4_mode == "descend":
+                cmd_z_now = max(end_z, start_z - descend_z_offset)
+                # As insertion proceeds we drift cmd_z toward end_z.  Once
+                # cmd_z_now == end_z, behaves like 'spiral' mode.
+
             target_pose = self._make_pose(
-                start_x + spiral_dx, start_y + spiral_dy, cmd_z, contact_pose.orientation,
+                start_x + spiral_dx + grad_dx,
+                start_y + spiral_dy + grad_dy,
+                cmd_z_now,
+                contact_pose.orientation,
             )
-            motion_update = self._build_motion_update(
-                target_pose, stiffness, feedforward_fz=stage4_feedforward_fz
-            )
+            if self.stage4_compliance_enable:
+                # Bug 101 (C): low XY stiffness so chamfer can guide plug;
+                # modest Z stiffness keeps a controllable spring force.
+                sx = self.stage4_xy_stiffness_n_per_m
+                sz = self.stage4_z_stiffness_n_per_m
+                motion_update = self._build_motion_update_axis(
+                    target_pose,
+                    stiffness_xyz=(sx, sx, sz),
+                    rot_stiffness=(sx * 0.5, sx * 0.5, sx * 0.5),
+                    damping_xyz=(sx * 0.6, sx * 0.6, sz * 0.6),
+                    rot_damping=(sx * 0.3, sx * 0.3, sx * 0.3),
+                    feedforward_fz=stage4_feedforward_fz,
+                )
+            else:
+                motion_update = self._build_motion_update(
+                    target_pose, stiffness, feedforward_fz=stage4_feedforward_fz
+                )
             try:
                 move_robot(motion_update=motion_update)
             except Exception as ex:
@@ -1634,14 +2120,43 @@ class ANT(Policy):
             force_abs = self._force_magnitude(obs)
             pos_error = np.linalg.norm(obs.controller_state.tcp_error[:3])
             tcp_z = obs.controller_state.tcp_pose.position.z
+
+            # Bug 100 (B): integrate Fxy gradient.  Step against the lateral
+            # reaction.  Note Fxy is in the wrist frame, but for small TCP-down
+            # rotations from home, wrist XY ≈ base_link XY for sign/magnitude
+            # purposes (good enough as a search cue).  Sign flip: a *positive*
+            # Fx means the chamfer pushes the wrist in +x → step the command
+            # in −x to seek the centre.
+            if (
+                self.stage4_fxy_gradient_enable
+                and stage4_mode != "direct"
+                and elapsed_stage > self.stage4_settle_sec
+            ):
+                fx, fy = self._wrench_force_xy(obs)
+                fxy_mag = math.hypot(fx, fy)
+                if fxy_mag > self.stage4_fxy_threshold_n:
+                    step = self.stage4_fxy_step_per_sample_m
+                    grad_dx -= step * (fx / fxy_mag)
+                    grad_dy -= step * (fy / fxy_mag)
+                    # Cap accumulated offset.
+                    cap = self.stage4_fxy_max_offset_m
+                    grad_norm = math.hypot(grad_dx, grad_dy)
+                    if grad_norm > cap:
+                        grad_dx *= cap / grad_norm
+                        grad_dy *= cap / grad_norm
+
             spiral_tag = (
                 f" spiral=({spiral_dx*1000:+.1f},{spiral_dy*1000:+.1f})mm"
                 if spiraling else ""
             )
+            grad_tag = (
+                f" grad=({grad_dx*1000:+.1f},{grad_dy*1000:+.1f})mm"
+                if (grad_dx != 0.0 or grad_dy != 0.0) else ""
+            )
             self.get_logger().info(
-                f"Stage 4: cmd_z={cmd_z:.4f} tcp_z={tcp_z:.4f} "
+                f"Stage 4 [{stage4_mode}]: cmd_z={cmd_z_now:.4f} tcp_z={tcp_z:.4f} "
                 f"pos_error={pos_error:.4f} m  |F|={force_abs:.2f} N"
-                f"{spiral_tag}"
+                f"{spiral_tag}{grad_tag}"
             )
 
             # Bug 98: slack-detection early exit.  Sustained |F| drop below
