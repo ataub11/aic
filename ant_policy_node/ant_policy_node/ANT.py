@@ -247,7 +247,15 @@ class ANT(Policy):
         # the plug, modest Z stiffness with bounded feedforward to drive
         # descent without overshooting.  Per-axis stiffness vectors are
         # sent via the new _build_motion_update_axis() helper.
-        self.stage4_compliance_enable = True
+        #
+        # DISABLED-BY-DEFAULT after sim 2026-04-29b regression (run_2026-04-29b):
+        # Z stiffness=120 N/m was too soft — cable tension RAISED the arm by
+        # 1.6–1.9 cm during Stage 4 (T2: tcp_z 0.179→0.198, T3: tcp_z
+        # 0.069→0.106).  The arm couldn't hold depth against cable pull, so
+        # the plug ended up further from the port (T3 final distance 0.14m
+        # → 0.18m regression).  Re-enable only after raising Z stiffness back
+        # toward 200 N/m and re-running sim.
+        self.stage4_compliance_enable = False
         self.stage4_xy_stiffness_n_per_m = 50.0    # gentle XY (was 85–200)
         self.stage4_z_stiffness_n_per_m  = 120.0   # firm-ish Z
 
@@ -277,13 +285,21 @@ class ANT(Policy):
         # ---- Bug 104 (I): adaptive Stage 4 mode by Stage 2/3 XY error ------
         # xy_err = |contact_pose.xy − connector_pose.xy| at Stage 4 entry.
         #   < 5 mm    → 'direct'  : just hold + slack-detect, no spiral
-        #   5–15 mm   → 'spiral'  : fixed-z spiral (current Bug 98b)
-        #   15–40 mm  → 'descend' : spiral-with-descent ramp (NEW)
+        #   5–40 mm   → 'spiral'  : fixed-z spiral with cmd_z=end_z (Bug 98b)
         #   ≥ 40 mm   → 'skip'    : Bug 94 already skips ≥ 60 mm; tightened
         #                            to 40 mm here so we don't waste 130 s
         #                            holding the spiral over a misaligned port.
+        #
+        # 'descend' mode (cmd_z ramping from start_z down to end_z) was tried
+        # in sim 2026-04-29b: it commanded NO spring force at t=0 (cmd_z =
+        # start_z = current arm Z, pos_error≈0) and slowly ramped, which
+        # gave LESS downward force than the 'spiral' mode's "command end_z
+        # immediately for max spring force" approach.  Collapsed back into
+        # 'spiral' by setting descend_thresh == spiral_thresh.  Code is
+        # retained behind the threshold so it can be reactivated with
+        # different ramp semantics later.
         self.stage4_mode_thresh_direct_m  = 0.005
-        self.stage4_mode_thresh_spiral_m  = 0.015
+        self.stage4_mode_thresh_spiral_m  = 0.040
         self.stage4_mode_thresh_descend_m = 0.040
         self.stage4_descend_ramp_m_per_orbit = 0.002  # 2 mm down per orbit
 

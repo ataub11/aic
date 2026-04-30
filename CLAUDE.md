@@ -44,7 +44,9 @@ and have the Dockerfile do a fresh colcon build, but that's deferred.
 | sim 44 | 88.46 | Clean docker rebuild. Install/ synced. Bug 95 (SC force-abort `break`) added. T3 navigation + descent fully working — TCP reaches z=0.0142 (target 0.0095) — but plug ends up 0.19 m from port due to gripper-orientation issue. |
 | **v17** | **23.25** | Real-HW reproduces v14 failure mode despite v15 fixes. T1 = 21.25 (dist=0.10 m, jerk=1.95 — identical to v14). T2 = 1.0 (dist=0.17 m — Bug 92 brought plug into measurement range vs unmeasurable in v14, still outside `init×0.5≈0.085 m` radius). T3 = 1.0 (dist=0.22 m — Bug 93 6 cm steps insufficient). No force penalties (Bug 94+95 working). v15 changes help marginally but worst-case days still unsolved. |
 | **sim 2026-04-28** | **103.05** | First run with Bug 96A code. Threshold was 21.0N (lowered to 20.5N after), so high-tension path never triggered — score is mostly sim variance + favorable T3 lateral. T1=50.01, T2=37.30, T3=15.74. `build_version=unknown` (pixi bypass; now fixed). |
-| **main (Bugs 96A/97/98)** | **PENDING SIM** | Bug 96A: adaptive lateral feedforward (5-way split + 4N Y) when baseline > 20.5N. Bug 97: SC Stage 1 sub-step always fires. Bug 98a: Stage 4 cable-slack early exit. Bug 98b: Stage 4 XY spiral ±8mm. Need ≥3 sim runs to validate. |
+| **sim 2026-04-29** | **99.59** | Bug 96A code fully active. T1=61.37 (lucky 38pt partial insert), T2=37.22 (0.04m, no insertion), T3=1.0 (0.14m, gripper-orient). `build_version=local-2e4867c`. |
+| **sim 2026-04-29b** | **99.84** | First run with Bugs 99–105 (branch `claude/review-simulation-logs-6knxl`). T1=61.37 preserved. T2=37.48 preserved. T3=1.0 with **distance regressed 0.14→0.18m** because **Bug 101 per-axis compliance (Z=120 N/m)** was too soft — cable tension RAISED arm 1.6–1.9 cm during Stage 4 (T2 tcp_z 0.179→0.198, T3 0.069→0.106). **Bug 105 vision detection fired and correctly fell back** (detection 21.8 cm off; sanity radius 5 cm rejected it). All other new bugs neutral or marginally helpful. |
+| **competition-ready (post-29b fix)** | **PENDING SIM** | **Bug 101 disabled by default** + **Bug 104 'descend' band collapsed into 'spiral'** (descend ramp commanded zero spring force at t=0). Other bugs (99 no-op, 100 Fxy gradient, 102 stiff lateral, 103 anchor bias, 105 vision-with-fallback) retained. Worst-case behaviour matches v15 / sim 04-29; high-tension days should benefit from 102/103. Re-validate before submitting. |
 
 ## Real-HW vs sim variance pattern (key insight)
 
@@ -168,6 +170,60 @@ detection failure is no worse than the prior code.  For full generalisation
 to unknown SFP boards, a successor effort needs side-camera or board-frame
 detection (HSV from above will not work — see "SFP HSV from above is
 structurally blind" in Policy/runtime constraints).
+
+## Competition-readiness checklist (claude/review-simulation-logs-6knxl)
+
+### What's enabled by default (post-29b)
+- ✅ Bug 99: yaw-correction table (currently 0.0 rad → no-op until calibrated)
+- ✅ Bug 100: Fxy gradient during Stage 4 (small, no harm)
+- ❌ **Bug 101: per-axis compliance — DISABLED** (caused 1.6–1.9 cm Stage-4 rise)
+- ✅ Bug 102: stiff Cartesian lateral (250 N/m) on high-tension days
+- ✅ Bug 103: cable-anchor bias (1 cm) on high-tension days
+- ✅ Bug 104: Stage 4 mode selector — but 'descend' band collapsed into 'spiral'
+- ✅ Bug 105: vision-localised SC port (with calibrated fallback if vision fails sanity)
+
+### Local-sim vs competition-HW differences (durable)
+- **Cable tension variance**. Sim baselines cluster 18.9–20.9 N; real HW
+  oscillates 18–25 N day to day. Bug 96A threshold (20.5 N) catches mid-to-
+  high baselines; Bugs 102/103 only fire when high-tension is detected, so
+  they're **neutral on good days, helpful on bad days**.
+- **Vision lighting**. Sim uses gz rendering at fixed lighting; real HW
+  varies. Bug 105's 5 cm sanity radius around the calibrated XY guards
+  against false detections in either environment. Worst case = same as v15.
+- **`build_version` env var**. `submit.sh` injects the git SHA into the
+  Docker image at build time → ANT logs `build_version=<sha>` on real HW.
+  Local pixi runs log `build_version=local-<sha>` (set by the wrapper).
+  An "unknown" value means the build skipped the SHA injection — never
+  ship an "unknown" build.
+- **TF tree parity**. Same in both environments: URDF kinematics only,
+  no `/scoring/tf` relay. `_tf_buffer` lookups for `center_camera/optical`
+  → `base_link` work identically.
+- **Force/torque sensor**. Same `wrist_wrench` topic, but real HW has
+  more noise + bias. Bug 100's 3 N gradient threshold is well above sim
+  noise but may need to be raised to 4–5 N if real-HW Fxy noise is large.
+- **Stage 4 timing**. The 2.0 s slack-detection requires sim-time
+  monotonicity. Real-HW clock is wall-clock, so the threshold behaves
+  the same. No code change needed.
+
+### Submission steps
+1. Run **at least one more local sim** with Bug 101 disabled to verify
+   T1/T2 preserved and T3 not regressed below 0.14 m distance.
+2. Bump tag in `docker/docker-compose.yaml` (e.g. `ant-policy:v18`).
+3. `./submit.sh v18` — builds image with `BUILD_VERSION=<git-sha>`,
+   verifies via local docker compose, pushes to ECR.
+4. Confirm `build_version=<sha>` appears in the first ANT log line of
+   the next eval — never ship `unknown`.
+5. Capture eval-day result + log to `ant_policy_node/sim_runs/run_<date>/`
+   and add a row to the score-progression table here.
+
+### Known unsolved problems (deferred)
+- **T3 SC plug orientation** (no progress in 29b). Bug 99 calibration
+  table is the lever — needs a one-shot `ground_truth:=true` sim to
+  read `base_link → sc_port_base` and pick the right gripper yaw.
+- **High-tension real-HW days**. Bugs 96A/102/103 should help but are
+  unvalidated against the v14/v17 23-point regime. Real test only.
+- **SFP from-above vision**. Structurally impossible without a side camera
+  or board-frame detection. Bug 105 is SC-only on purpose.
 
 ## v15 ships with these robustness fixes (vs v11/v14)
 
