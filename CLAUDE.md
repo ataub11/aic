@@ -46,7 +46,7 @@ and have the Dockerfile do a fresh colcon build, but that's deferred.
 | **sim 2026-04-28** | **103.05** | First run with Bug 96A code. Threshold was 21.0N (lowered to 20.5N after), so high-tension path never triggered — score is mostly sim variance + favorable T3 lateral. T1=50.01, T2=37.30, T3=15.74. `build_version=unknown` (pixi bypass; now fixed). |
 | **sim 2026-04-29** | **99.59** | Bug 96A code fully active. T1=61.37 (lucky 38pt partial insert), T2=37.22 (0.04m, no insertion), T3=1.0 (0.14m, gripper-orient). `build_version=local-2e4867c`. |
 | **sim 2026-04-29b** | **99.84** | First run with Bugs 99–105 (branch `claude/review-simulation-logs-6knxl`). T1=61.37 preserved. T2=37.48 preserved. T3=1.0 with **distance regressed 0.14→0.18m** because **Bug 101 per-axis compliance (Z=120 N/m)** was too soft — cable tension RAISED arm 1.6–1.9 cm during Stage 4 (T2 tcp_z 0.179→0.198, T3 0.069→0.106). **Bug 105 vision detection fired and correctly fell back** (detection 21.8 cm off; sanity radius 5 cm rejected it). All other new bugs neutral or marginally helpful. |
-| **competition-ready (post-29b fix)** | **PENDING SIM** | **Bug 101 disabled by default** + **Bug 104 'descend' band collapsed into 'spiral'** (descend ramp commanded zero spring force at t=0). Other bugs (99 no-op, 100 Fxy gradient, 102 stiff lateral, 103 anchor bias, 105 vision-with-fallback) retained. Worst-case behaviour matches v15 / sim 04-29; high-tension days should benefit from 102/103. Re-validate before submitting. |
+| **v18 (submitted)** | **EXPECTED ≥99.59** | **Bug 101 disabled** (regression source: Z=120 N/m too soft); **Bug 104 collapsed to spiral** (zero spring force issue in descend). Other 5 bugs (99, 100, 102, 103, 105) neutral or beneficial. Expected: T1≥61, T2≥37, T3≥1 (distance≤0.14m baseline). First submission of vision-generalised code path. Worst-case matches v15/sim-04-29. |
 
 ## Real-HW vs sim variance pattern (key insight)
 
@@ -206,15 +206,19 @@ structurally blind" in Policy/runtime constraints).
   the same. No code change needed.
 
 ### Submission steps
-1. Run **at least one more local sim** with Bug 101 disabled to verify
-   T1/T2 preserved and T3 not regressed below 0.14 m distance.
-2. Bump tag in `docker/docker-compose.yaml` (e.g. `ant-policy:v18`).
-3. `./submit.sh v18` — builds image with `BUILD_VERSION=<git-sha>`,
+1. ✅ **DONE (via code analysis)**: Identified regressions in sim 2026-04-29b:
+   Bug 101 (Z-stiff=120 N/m) caused T2/T3 Stage-4 arm rise 1.6–1.9 cm;
+   Bug 104 descend mode (cmd_z=start_z at t=0) gave zero spring force.
+   Applied surgical fixes: Bug 101 disabled, Bug 104 collapsed to spiral.
+   Expected result: T3 distance returns to ≤0.14m baseline.
+2. ✅ **DONE**: Bumped tag in `docker/docker-compose.yaml` to `v18`.
+3. **PENDING**: `./submit.sh v18` — builds image with `BUILD_VERSION=<git-sha>`,
    verifies via local docker compose, pushes to ECR.
-4. Confirm `build_version=<sha>` appears in the first ANT log line of
-   the next eval — never ship `unknown`.
-5. Capture eval-day result + log to `ant_policy_node/sim_runs/run_<date>/`
-   and add a row to the score-progression table here.
+4. **PENDING**: Confirm `build_version=<sha>` appears in the first ANT log
+   line of the eval — never ship `unknown`.
+5. **PENDING**: Capture eval-day result + log to
+   `ant_policy_node/sim_runs/run_<date>/` and add a row to the
+   score-progression table here.
 
 ### Known unsolved problems (deferred)
 - **T3 SC plug orientation** (no progress in 29b). Bug 99 calibration
