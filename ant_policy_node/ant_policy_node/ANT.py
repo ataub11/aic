@@ -215,6 +215,36 @@ class ANT(Policy):
         self.stage4_spiral_ramp_sec = 5.0              # seconds to grow from 0 to max_radius
         self.stage4_spiral_period_sec = 10.0           # one orbit period (slow → low jerk)
 
+        # Bug 109: gate Stage 4 slack-detection on TCP depth.  In sim 04-30c
+        # T1 the slack-detect fired at iter 1 (|F|=7.93 N << 14.63 N) because
+        # cable tension was low at safe_z, even though the arm had never
+        # actually reached the port.  Require tcp_z to be within
+        # `stage4_slack_depth_window_m` of cmd_z before honoring the slack
+        # signal.  Harmless on T1 (Stage 4 wasn't going to help anyway), but
+        # guards against masking a recoverable force buildup on real HW.
+        self.stage4_slack_depth_window_m = 0.03
+
+        # Bug 110: SC Stage 4 force-cliff guard.  Sim 04-30c T3 spent the full
+        # 120 s with |F| oscillating 19.5–20.7 N — one cable-noise spike from
+        # tripping the −12 force penalty.  When |F| stays > guard_threshold
+        # for `guard_sustained_sec`, raise cmd_z by `guard_backoff_m` (cap at
+        # `guard_max_backoff_m`).  Lowers steady |F| while preserving the
+        # ability to descend if cable slackens.
+        self.stage4_force_guard_enable = True
+        self.stage4_force_guard_threshold_n = 19.5
+        self.stage4_force_guard_sustained_sec = 0.5
+        self.stage4_force_guard_backoff_m = 0.002      # 2 mm raise per trip
+        self.stage4_force_guard_max_backoff_m = 0.010  # cap accumulated backoff
+        self.stage4_force_guard_recover_n = 17.0       # below this, decay backoff
+
+        # Bug 111: Z-dither during Stage 4 'direct' mode.  In sim 04-30c T3
+        # the arm sat at xy_err=1.6 mm but tcp_z held 5 cm above target — the
+        # plug never engaged the chamfer.  A small ±2 mm Z oscillation lets
+        # the chamfer rotate past contact features that block static descent.
+        self.stage4_direct_z_dither_enable = True
+        self.stage4_direct_z_dither_amp_m = 0.002
+        self.stage4_direct_z_dither_period_sec = 2.0
+
         # ---- Bug 99 (A): calibrated port-yaw alignment ---------------------
         # The SC plug attaches to the gripper at a fixed mount pose (cable.sdf
         # gripper_offset rpy=(0.4432, -0.4838, 1.3303) and the SC plug local
@@ -283,7 +313,11 @@ class ANT(Policy):
         # 85 N/m; v18 used 250 N/m; v19 raises to 350 N/m to overpower the
         # cable equilibrium that left v18's lateral 5–17 cm short.  Arrival
         # check (Bug 106) escalates further (+50 N/m per retry) if needed.
-        self.lateral_high_tension_stiffness_n_per_m = 350.0
+        # Bug 112: 350 N/m left every sub-step stalled at the same 21 mm
+        # residual in sim 04-30c (T2 SFP and T3 SC both).  Bump to 450 N/m
+        # so the impedance can actually walk past the cable equilibrium.
+        # Bug 106 retry escalates further (+50 N/m per retry, cap 500 N/m).
+        self.lateral_high_tension_stiffness_n_per_m = 450.0
         self.enable_high_tension_stiff_lateral = True
 
         # ---- Bug 103 (H): cable-anchor cue for Y-bias on high-tension day --
@@ -338,9 +372,13 @@ class ANT(Policy):
         # If either gate fails, falls back to the calibrated table — same
         # behaviour as before this bug, so a worst-case regression cannot
         # underperform the current code.
+        # Bug 114: tightened gates after sim 04-30c rejected an 8.9 cm-off
+        # detection.  The detector confidently picked the wrong contour;
+        # raise the score floor and tighten the sanity radius so the path
+        # only fires when the detection is actually trustworthy.
         self.enable_vision_sc_localization = True
-        self.vision_min_score = 1.0
-        self.vision_sanity_radius_m = 0.05    # max deviation from calibrated XY
+        self.vision_min_score = 2.0
+        self.vision_sanity_radius_m = 0.04    # max deviation from calibrated XY
         self.vision_min_area_px = 500
         self.vision_max_area_frac = 0.50
 
@@ -357,8 +395,12 @@ class ANT(Policy):
         # feedforward and stiffness up to `lateral_arrival_max_retries`
         # times.  Generic — works for any zone/trial because it operates on
         # actual vs. commanded TCP XY only, no port-specific values.
+        # Bug 113: tighten arrival tolerance.  Sim 04-30c showed every
+        # lateral phase stalled at 21–22 mm — the previous 25 mm tolerance
+        # let the retry path skip on every trial, defeating Bug 106's
+        # purpose.  15 mm forces at least one retry on bad days.
         self.enable_lateral_arrival_check = True
-        self.lateral_arrival_tolerance_m = 0.025          # accept residual ≤ 2.5 cm
+        self.lateral_arrival_tolerance_m = 0.015          # accept residual ≤ 1.5 cm
         self.lateral_arrival_max_retries = 2
         self.lateral_arrival_ff_scale_per_retry = 0.5     # +50% ff each retry
         self.lateral_arrival_ff_cap_n = 9.0               # never exceed this
@@ -1148,6 +1190,7 @@ class ANT(Policy):
         label: str = "move",
         check_force: bool = True,
         feedforward_fy: float = 0.0,
+        feedforward_fz: float = 0.0,
         stiffness_xyz: float = None,
     ) -> None:
         """Send a Cartesian pose target and block until TCP converges or stalls.
@@ -1185,7 +1228,9 @@ class ANT(Policy):
 
             _stiffness = stiffness_xyz if stiffness_xyz is not None else self.approach_stiffness
             motion_update = self._build_motion_update(
-                target_pose, _stiffness, feedforward_fy)
+                target_pose, _stiffness, feedforward_fy,
+                feedforward_fz=feedforward_fz,
+            )
             try:
                 move_robot(motion_update=motion_update)
             except Exception as ex:
@@ -1391,23 +1436,46 @@ class ANT(Policy):
                     f"(Bug 96A+102+103+106+107) lateral_stiffness="
                     f"{lateral_stiffness if lateral_stiffness is not None else 'default'}"
                 )
-                fractions = tuple((i + 1) / n_split for i in range(n_split))
-                for step_idx, fraction in enumerate(fractions, start=1):
-                    step_y = y_now + y_delta * fraction
+                # Bug 117: relative sub-step targets.  In sim 04-30c every
+                # absolute-target sub-step settled at the same 21–22 mm
+                # residual because the impedance equilibrium relative to the
+                # cable equilibrium repeated each step.  Recomputing the
+                # target as `current_actual + step_size_dy` makes each step
+                # an actual nudge from where the arm is, not toward an
+                # absolute target the controller can't reach.
+                step_dy_per_sub = y_delta / float(n_split)
+                for step_idx in range(1, n_split + 1):
+                    obs_step = get_observation()
+                    if obs_step is not None:
+                        cur_y = obs_step.controller_state.tcp_pose.position.y
+                    else:
+                        cur_y = y_now + step_dy_per_sub * (step_idx - 1)
+                    step_y = cur_y + step_dy_per_sub
                     self.get_logger().info(
                         f"Stage 1 SFP T2: WP2 step {step_idx}/{n_split} → "
                         f"({tgt_x + bias_dx:.4f},{step_y + bias_dy:.4f}) at safe_z={safe_z:.3f} "
-                        f"ff_y={ff_y:.1f} N"
+                        f"ff_y={ff_y:.1f} N (rel from cur_y={cur_y:.4f})"
                     )
-                    self._move_to_pose_and_wait(
-                        self._make_pose(tgt_x + bias_dx, step_y + bias_dy, safe_z, orient),
-                        move_robot, get_observation, start_time, time_limit_sec,
-                        convergence_m=0.015, stage_timeout_sec=30.0,
-                        label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
-                        check_force=False,
-                        feedforward_fy=ff_y,
-                        stiffness_xyz=lateral_stiffness,
-                    )
+                    # Bug 116: each step's residual converges to a 21–22 mm
+                    # floor regardless of iteration count (sim 04-30c).  Cap
+                    # per-step time at 14 s so the 7-step lateral can't burn
+                    # 200 s of the trial budget.  Stall detection still fires
+                    # when the arm hits cable equilibrium; if the per-step
+                    # timeout trips first (OutOfReachError) we move on to the
+                    # next sub-step.  Bug 106 retry then runs once at the end
+                    # with stronger feedforward.
+                    try:
+                        self._move_to_pose_and_wait(
+                            self._make_pose(tgt_x + bias_dx, step_y + bias_dy, safe_z, orient),
+                            move_robot, get_observation, start_time, time_limit_sec,
+                            convergence_m=0.015, stage_timeout_sec=14.0,
+                            label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
+                            check_force=False,
+                            feedforward_fy=ff_y,
+                            stiffness_xyz=lateral_stiffness,
+                        )
+                    except OutOfReachError:
+                        pass
                     obs_wp = get_observation()
                     if obs_wp:
                         orient = obs_wp.controller_state.tcp_pose.orientation
@@ -1455,15 +1523,46 @@ class ANT(Policy):
                     )
                     obs_wp = get_observation()
                     orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
+                # Bug 107/115: T1 lateral also runs the high-tension stiff
+                # impedance lift so the v14/v17 worst-case days have a chance
+                # to actually reach (tgt_x, tgt_y).  Arrival check (Bug 106)
+                # then escalates if the impedance still can't close it.
+                t1_high_tension = self._high_tension
+                t1_lateral_stiffness = (
+                    self.lateral_high_tension_stiffness_n_per_m
+                    if (t1_high_tension and self.enable_high_tension_stiff_lateral)
+                    else None
+                )
                 self.get_logger().info(
                     f"Stage 1 SFP T1: lateral to T1 port ({tgt_x:.4f},{tgt_y:.4f}) "
-                    f"at transit_z={transit_z:.3f}"
+                    f"at transit_z={transit_z:.3f} stiffness="
+                    f"{t1_lateral_stiffness if t1_lateral_stiffness is not None else 'default'}"
                 )
                 self._move_to_pose_and_wait(
                     self._make_pose(tgt_x, tgt_y, transit_z, orient),
                     move_robot, get_observation, start_time, time_limit_sec,
                     convergence_m=0.015, stage_timeout_sec=30.0,
                     label="Stage 1 SFP T1 WP2 lateral", check_force=False,
+                    stiffness_xyz=t1_lateral_stiffness,
+                )
+                obs_t1_arr = get_observation()
+                if obs_t1_arr is not None:
+                    orient = obs_t1_arr.controller_state.tcp_pose.orientation
+                # Bug 115: arrival check + retry on T1 SFP lateral.  Previous
+                # builds shipped this only for T2/SC; sim 04-30c showed T1
+                # also stalled (0.0236 m residual) yet skipped any escalation.
+                _, _, orient = self._lateral_arrival_check_and_retry(
+                    target_xy=(tgt_x, tgt_y),
+                    lateral_z=transit_z,
+                    orient=orient,
+                    move_robot=move_robot,
+                    get_observation=get_observation,
+                    start_time=start_time,
+                    time_limit_sec=time_limit_sec,
+                    zone="sfp",
+                    label="Stage 1 SFP T1 WP2",
+                    base_ff_y=0.0,
+                    base_stiffness=t1_lateral_stiffness,
                 )
             obs_final = self._wait_for_observation(get_observation, start_time, time_limit_sec)
             orient_final = obs_final.controller_state.tcp_pose.orientation
@@ -1577,19 +1676,31 @@ class ANT(Policy):
             f"{lateral_stiffness if lateral_stiffness is not None else 'default'} "
             f"anchor_bias=({bias_dx*1000:+.1f},{bias_dy*1000:+.1f})mm"
         )
+        # Bug 117: relative sub-step targets for SC lateral too.
+        step_dx_per_sub = (base_x - step_x) / float(n_steps)
+        step_dy_per_sub = (base_y - step_y) / float(n_steps)
         for sub in range(1, n_steps + 1):
-            t = sub / n_steps
-            tgt_x = step_x + (base_x - step_x) * t + bias_dx
-            tgt_y = step_y + (base_y - step_y) * t + bias_dy
-            self._move_to_pose_and_wait(
-                self._make_pose(tgt_x, tgt_y, lateral_z, orient),
-                move_robot, get_observation, start_time, time_limit_sec,
-                convergence_m=0.015, stage_timeout_sec=20.0,
-                label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (z={lateral_z:.3f})",
-                check_force=False,
-                feedforward_fy=ff_y,
-                stiffness_xyz=lateral_stiffness,
-            )
+            obs_sub_pre = get_observation()
+            if obs_sub_pre is not None:
+                cur_x = obs_sub_pre.controller_state.tcp_pose.position.x
+                cur_y = obs_sub_pre.controller_state.tcp_pose.position.y
+            else:
+                cur_x = step_x + step_dx_per_sub * (sub - 1)
+                cur_y = step_y + step_dy_per_sub * (sub - 1)
+            tgt_x = cur_x + step_dx_per_sub + bias_dx
+            tgt_y = cur_y + step_dy_per_sub + bias_dy
+            try:
+                self._move_to_pose_and_wait(
+                    self._make_pose(tgt_x, tgt_y, lateral_z, orient),
+                    move_robot, get_observation, start_time, time_limit_sec,
+                    convergence_m=0.015, stage_timeout_sec=14.0,
+                    label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (z={lateral_z:.3f})",
+                    check_force=False,
+                    feedforward_fy=ff_y,
+                    stiffness_xyz=lateral_stiffness,
+                )
+            except OutOfReachError:
+                pass
             obs_sub = get_observation()
             if obs_sub is not None:
                 orient = obs_sub.controller_state.tcp_pose.orientation
@@ -1786,12 +1897,28 @@ class ANT(Policy):
                 connector_pose.position.x, connector_pose.position.y,
                 stage3_z, target_orient,
             )
+            # Bug 118: SFP Stage 3 with high cable tension stalls 8–10 cm
+            # above target (sim 04-30c T1 stalled at z=0.232, target 0.1335).
+            # Add a downward feedforward on high-tension days so the
+            # impedance-spring force isn't fighting cable equilibrium alone.
+            # SFP plug spring (200 N/m) is capped at max_wrench=15 N; the
+            # feedforward escapes that cap.  SC keeps 0 here — its Stage 4
+            # already adds a downward feedforward separately.
+            stage3_ff_z = (
+                -5.0 if (zone == "sfp" and self._high_tension) else 0.0
+            )
+            if stage3_ff_z != 0.0:
+                self.get_logger().info(
+                    f"Stage 3 (SFP): high-tension Z feedforward "
+                    f"{stage3_ff_z:.1f} N (Bug 118)"
+                )
             try:
                 self._move_to_pose_and_wait(
                     target_pose, move_robot, get_observation,
                     start_time, time_limit_sec,
                     convergence_m=0.010, stage_timeout_sec=20.0,
                     label=f"Stage 3 {zone.upper()} direct descent", check_force=False,
+                    feedforward_fz=stage3_ff_z,
                 )
             except OutOfReachError:
                 # Timed out — arm stalled short of connector_z under cable load.
@@ -2337,6 +2464,9 @@ class ANT(Policy):
         # Bug 104 (I): per-orbit z-descent counter for 'descend' mode.
         orbits_completed = 0.0
         descend_z_offset = 0.0
+        # Bug 110: force-cliff guard accumulated cmd_z back-off.
+        force_guard_offset_z = 0.0
+        force_guard_high_start = None
         self.get_logger().info(
             f"Stage 4: active-insertion enabled (Bug 98+100+101+104) — "
             f"mode={stage4_mode} xy_err={xy_err*1000:.1f}mm "
@@ -2403,6 +2533,25 @@ class ANT(Policy):
                 cmd_z_now = max(end_z, start_z - descend_z_offset)
                 # As insertion proceeds we drift cmd_z toward end_z.  Once
                 # cmd_z_now == end_z, behaves like 'spiral' mode.
+
+            # Bug 111: in 'direct' mode the chamfer reaction can't pull the
+            # plug if cmd_z is held perfectly static.  After settle, oscillate
+            # cmd_z by ±dither_amp around the target so the plug rotates past
+            # micro-features.  Keeps mean cmd_z = end_z so steady spring force
+            # is unchanged; only the instantaneous command moves.
+            if (
+                self.stage4_direct_z_dither_enable
+                and stage4_mode == "direct"
+                and elapsed_stage > self.stage4_settle_sec
+            ):
+                amp = self.stage4_direct_z_dither_amp_m
+                period = max(0.001, self.stage4_direct_z_dither_period_sec)
+                phase = 2.0 * np.pi * (elapsed_stage - self.stage4_settle_sec) / period
+                cmd_z_now = cmd_z_now + amp * np.sin(phase)
+
+            # Bug 110: force-cliff guard.  Apply accumulated back-off raise so
+            # SC Stage 4 doesn't sit at the 20 N penalty cliff for 120 s.
+            cmd_z_now = cmd_z_now + force_guard_offset_z
 
             target_pose = self._make_pose(
                 start_x + spiral_dx + grad_dx,
@@ -2479,14 +2628,56 @@ class ANT(Policy):
                 f"{spiral_tag}{grad_tag}"
             )
 
-            # Bug 98: slack-detection early exit.  Sustained |F| drop below
-            # (baseline − slack_drop_n) means the port wall is taking the
-            # spring load instead of the cable — i.e., the plug is in the
-            # port.  Bail immediately to (1) avoid burning the rest of the
-            # 120 s hold and (2) stop applying force during the scoring
-            # window so any residual oscillation doesn't trigger penalties.
+            # Bug 110: force-cliff guard.  When |F| stays above threshold for
+            # `guard_sustained_sec`, raise cmd_z by `guard_backoff_m` (capped).
+            # When |F| drops back below `recover_n`, decay the offset back
+            # toward 0 so the arm tries to descend again as cable slackens.
             now_t = self.time_now()
-            if force_abs < slack_threshold:
+            if self.stage4_force_guard_enable:
+                if force_abs > self.stage4_force_guard_threshold_n:
+                    if force_guard_high_start is None:
+                        force_guard_high_start = now_t
+                    fg_duration = (now_t - force_guard_high_start).nanoseconds / 1e9
+                    if fg_duration >= self.stage4_force_guard_sustained_sec:
+                        new_off = min(
+                            self.stage4_force_guard_max_backoff_m,
+                            force_guard_offset_z + self.stage4_force_guard_backoff_m,
+                        )
+                        if new_off > force_guard_offset_z:
+                            force_guard_offset_z = new_off
+                            self.get_logger().warning(
+                                f"Stage 4: force-cliff guard — |F|={force_abs:.2f} N "
+                                f"> {self.stage4_force_guard_threshold_n:.1f} N for "
+                                f"{fg_duration:.1f} s; raising cmd_z by "
+                                f"{self.stage4_force_guard_backoff_m*1000:.1f} mm "
+                                f"(total backoff +{force_guard_offset_z*1000:.1f} mm)"
+                            )
+                        force_guard_high_start = now_t  # reset window
+                else:
+                    force_guard_high_start = None
+                    if (
+                        force_abs < self.stage4_force_guard_recover_n
+                        and force_guard_offset_z > 0.0
+                    ):
+                        force_guard_offset_z = max(
+                            0.0,
+                            force_guard_offset_z - self.stage4_force_guard_backoff_m * 0.5,
+                        )
+
+            # Bug 98 + Bug 109: slack-detection early exit.  Sustained |F|
+            # drop below (baseline − slack_drop_n) means the port wall is
+            # taking the spring load instead of the cable — i.e., the plug
+            # is in the port.  Bail immediately to (1) avoid burning the
+            # rest of the 120 s hold and (2) stop applying force during the
+            # scoring window so any residual oscillation doesn't trigger
+            # penalties.
+            #
+            # Bug 109: also require tcp_z to be within
+            # `stage4_slack_depth_window_m` of cmd_z.  Without this, T1 SFP
+            # exits at iter 1 with |F|=7.93 N because cable tension is low at
+            # safe_z — but the arm hasn't actually descended.
+            depth_ok = abs(tcp_z - cmd_z) <= self.stage4_slack_depth_window_m
+            if force_abs < slack_threshold and depth_ok:
                 if slack_start_t is None:
                     slack_start_t = now_t
                 slack_duration = (now_t - slack_start_t).nanoseconds / 1e9
@@ -2499,7 +2690,7 @@ class ANT(Policy):
                     send_feedback("Stage 4: insertion confirmed via slack detection")
                     break
             else:
-                slack_start_t = None  # reset; drop must be sustained
+                slack_start_t = None  # reset; drop must be sustained AND at depth
 
             # Hard force abort: pressing against solid surface, not inserting.
             timed_out, high_force_start = self._high_force_timed_out(
