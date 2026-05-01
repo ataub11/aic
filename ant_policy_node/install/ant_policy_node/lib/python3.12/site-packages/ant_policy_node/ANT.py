@@ -110,15 +110,16 @@ class ANT(Policy):
         #        → (-0.3845, 0.2326).  Each competition port is only ±2 cm in Y
         #        from this centre.  The old n=5 mean (-0.4398, 0.3357) was biased
         #        13.5 cm from the T1 port by test-config ports at Y=0.29–0.48.
-        #   SC:  competition T3 port position from sample_config trial_1/2
-        #        (board yaw=+17°).  The n=5 mean (-0.4028, 0.3527) is biased
-        #        7.7 cm by test configs not used in competition; the actual T3 port
-        #        is consistently at (-0.3830, 0.4295) across all sample_config runs.
+        #   SC:  Ground-truth calibrated from sim 2026-04-30b bag.
+        #        task_board/sc_port_1/sc_port_base_link in base_link = (−0.4887, 0.2881, 0.0145).
+        #        Confirmed by scoring distance 0.185 m matching computed sc_tip→port.
+        #        Previous value (−0.3830, 0.4295) was 10.6 cm × 14.1 cm off due to
+        #        task_board yaw=171.9° vs the assumed +17° orientation.
         self.zone_scouting_xy = {
             "sfp": (-0.3845, 0.200),    # T1 port Y (Bug 51: shifted -12 mm from 0.2126 to clear
                                         # NIC card mount; right finger now at Y≈0.220, clears 0.233)
                                         # NOT used in SFP fast path (bypasses grid) — kept for symmetry
-            "sc":  (-0.3830, 0.4295),   # sample_config T3 SC port (yaw=+17°)
+            "sc":  (-0.4887, 0.2881),   # sample_config T3 SC port — ground-truth bag calibration
         }
 
         # Individual competition port positions used as the Stage 1 fallback
@@ -137,7 +138,7 @@ class ANT(Policy):
         # SC:  single known port; same value as zone_scouting_xy["sc"].
         self.zone_known_ports = {
             "sfp": [(-0.3845, 0.200), (-0.3845, 0.2526)],
-            "sc":  [(-0.3830, 0.4295)],
+            "sc":  [(-0.4887, 0.2881)],   # ground-truth bag calibration 2026-04-30b
         }
 
         # ---- joint-space return-to-home position ----------------------------
@@ -236,7 +237,11 @@ class ANT(Policy):
         # observed at Stage 3 entry.  Positive yaw = rotate gripper CCW seen
         # from above.
         self.gripper_yaw_correction_rad = {
-            ("sc",  3): 0.0,   # CALIBRATE: start identity, iterate on sim feedback
+            # Ground-truth calibration from sim 2026-04-30b bag:
+            #   TCP at Stage 3 entry: euler_xyz ≈ (−180°, 0°, 0°)
+            #   sc_port_base euler_xyz in base_link: (−180°, 0°, −98.16°)
+            #   yaw_corr = −97.93° = −1.7093 rad so that Rz(yaw_corr) * tcp = port orientation
+            ("sc",  3): -1.7093,
             # SFP entries intentionally absent — T1 path scores 38pts already.
         }
         self.enable_yaw_alignment = True   # master toggle for Bug 99
