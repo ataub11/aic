@@ -224,24 +224,29 @@ class ANT(Policy):
         # guards against masking a recoverable force buildup on real HW.
         self.stage4_slack_depth_window_m = 0.03
 
-        # Bug 110: SC Stage 4 force-cliff guard.  Sim 04-30c T3 spent the full
-        # 120 s with |F| oscillating 19.5–20.7 N — one cable-noise spike from
-        # tripping the −12 force penalty.  When |F| stays > guard_threshold
-        # for `guard_sustained_sec`, raise cmd_z by `guard_backoff_m` (cap at
-        # `guard_max_backoff_m`).  Lowers steady |F| while preserving the
-        # ability to descend if cable slackens.
+        # Bug 110 RE-ARCHITECTED after sim 2026-05-01.  v1 raised cmd_z by
+        # discrete +2 mm steps when |F| > 19.5 N for 0.5 s; this (a) didn't
+        # actually drop steady force much because the cable tension itself
+        # was 19.5 N (raising cmd_z only reduces the spring contribution,
+        # already capped at max_wrench=15 N) and (b) the stepped raises
+        # produced infinite-jerk discontinuities that zeroed T3 smoothness.
+        # v2: smoothly decay |feedforward_fz| toward 0 instead of moving
+        # cmd_z.  This directly removes the policy's downward push, which
+        # is the only contribution we can actually back off (cable tension
+        # is uncontrollable).  Smooth proportional ramp → no jerk impulses.
         self.stage4_force_guard_enable = True
         self.stage4_force_guard_threshold_n = 19.5
-        self.stage4_force_guard_sustained_sec = 0.5
-        self.stage4_force_guard_backoff_m = 0.002      # 2 mm raise per trip
-        self.stage4_force_guard_max_backoff_m = 0.010  # cap accumulated backoff
-        self.stage4_force_guard_recover_n = 17.0       # below this, decay backoff
+        self.stage4_force_guard_sustained_sec = 0.3       # how long high |F| sustained
+        self.stage4_force_guard_ff_decay_per_sec = 4.0    # N/s reduction in |ff_z|
+        self.stage4_force_guard_recover_n = 18.5
+        self.stage4_force_guard_ff_recover_per_sec = 1.5  # N/s restoration toward base
 
-        # Bug 111: Z-dither during Stage 4 'direct' mode.  In sim 04-30c T3
-        # the arm sat at xy_err=1.6 mm but tcp_z held 5 cm above target — the
-        # plug never engaged the chamfer.  A small ±2 mm Z oscillation lets
-        # the chamfer rotate past contact features that block static descent.
-        self.stage4_direct_z_dither_enable = True
+        # Bug 111 DISABLED after sim 2026-05-01: combined with the stepped
+        # force-cliff guard backoff and Fxy gradient, the dither pushed T3
+        # jerk to 55.0 m/s³ and zeroed its smoothness score.  The chamfer-
+        # engagement benefit is unproven; keep flag in case we re-enable
+        # with much smaller amplitude later.
+        self.stage4_direct_z_dither_enable = False
         self.stage4_direct_z_dither_amp_m = 0.002
         self.stage4_direct_z_dither_period_sec = 2.0
 
@@ -283,7 +288,11 @@ class ANT(Policy):
         # the port centre — stepping the commanded XY by a small fraction of
         # −F̂xy nudges the plug toward the hole.  Replaces the blind Lissajous
         # when |Fxy| is informative; otherwise the spiral runs as before.
-        self.stage4_fxy_gradient_enable = True
+        # DISABLED after sim 2026-05-01: stepping XY by 0.6 mm every 50 ms
+        # (12 mm/s velocity changes) drove the smoothness score to 0 on T2
+        # (jerk 53.9) when combined with Stage 4 spiral.  Re-enable only
+        # with a much lower step rate or sample decimation.
+        self.stage4_fxy_gradient_enable = False
         self.stage4_fxy_threshold_n = 3.0          # below this, Fxy is noise
         self.stage4_fxy_step_per_sample_m = 0.0006 # 0.6 mm/sample max gradient step
         self.stage4_fxy_max_offset_m = 0.012       # cap accumulated offset at 12 mm
@@ -313,11 +322,10 @@ class ANT(Policy):
         # 85 N/m; v18 used 250 N/m; v19 raises to 350 N/m to overpower the
         # cable equilibrium that left v18's lateral 5–17 cm short.  Arrival
         # check (Bug 106) escalates further (+50 N/m per retry) if needed.
-        # Bug 112: 350 N/m left every sub-step stalled at the same 21 mm
-        # residual in sim 04-30c (T2 SFP and T3 SC both).  Bump to 450 N/m
-        # so the impedance can actually walk past the cable equilibrium.
-        # Bug 106 retry escalates further (+50 N/m per retry, cap 500 N/m).
-        self.lateral_high_tension_stiffness_n_per_m = 450.0
+        # Bug 112 REVERTED 450 → 350 N/m after sim 2026-05-01 showed the
+        # higher value combined with retry escalations contributed to T2/T3
+        # force penalties.  350 was the sim-04-30c value (132.87 score).
+        self.lateral_high_tension_stiffness_n_per_m = 350.0
         self.enable_high_tension_stiff_lateral = True
 
         # ---- Bug 103 (H): cable-anchor cue for Y-bias on high-tension day --
@@ -395,12 +403,13 @@ class ANT(Policy):
         # feedforward and stiffness up to `lateral_arrival_max_retries`
         # times.  Generic — works for any zone/trial because it operates on
         # actual vs. commanded TCP XY only, no port-specific values.
-        # Bug 113: tighten arrival tolerance.  Sim 04-30c showed every
-        # lateral phase stalled at 21–22 mm — the previous 25 mm tolerance
-        # let the retry path skip on every trial, defeating Bug 106's
-        # purpose.  15 mm forces at least one retry on bad days.
+        # Bug 113 REVERTED to 0.025 m after sim 2026-05-01 showed retries
+        # at 15 mm tol made things worse: T2/T3 retried with ff_y=9N +
+        # stiff=500, force-spike contributing to the −12 force penalty.
+        # 25 mm is the same sim-04-30c value (132.87 score) which scored
+        # without force penalties.
         self.enable_lateral_arrival_check = True
-        self.lateral_arrival_tolerance_m = 0.015          # accept residual ≤ 1.5 cm
+        self.lateral_arrival_tolerance_m = 0.025
         self.lateral_arrival_max_retries = 2
         self.lateral_arrival_ff_scale_per_retry = 0.5     # +50% ff each retry
         self.lateral_arrival_ff_cap_n = 9.0               # never exceed this
@@ -1436,46 +1445,31 @@ class ANT(Policy):
                     f"(Bug 96A+102+103+106+107) lateral_stiffness="
                     f"{lateral_stiffness if lateral_stiffness is not None else 'default'}"
                 )
-                # Bug 117: relative sub-step targets.  In sim 04-30c every
-                # absolute-target sub-step settled at the same 21–22 mm
-                # residual because the impedance equilibrium relative to the
-                # cable equilibrium repeated each step.  Recomputing the
-                # target as `current_actual + step_size_dy` makes each step
-                # an actual nudge from where the arm is, not toward an
-                # absolute target the controller can't reach.
-                step_dy_per_sub = y_delta / float(n_split)
-                for step_idx in range(1, n_split + 1):
-                    obs_step = get_observation()
-                    if obs_step is not None:
-                        cur_y = obs_step.controller_state.tcp_pose.position.y
-                    else:
-                        cur_y = y_now + step_dy_per_sub * (step_idx - 1)
-                    step_y = cur_y + step_dy_per_sub
+                # Bug 117 REVERTED (sim 2026-05-01: relative targets only
+                # advanced 11 mm out of 72 mm intended because each step's
+                # target moved with the arm, so the ladder lost its
+                # absolute reference).  Use absolute fractional targets
+                # against y_now snapshot so progress accumulates.
+                fractions = tuple((i + 1) / n_split for i in range(n_split))
+                for step_idx, fraction in enumerate(fractions, start=1):
+                    step_y = y_now + y_delta * fraction
                     self.get_logger().info(
                         f"Stage 1 SFP T2: WP2 step {step_idx}/{n_split} → "
                         f"({tgt_x + bias_dx:.4f},{step_y + bias_dy:.4f}) at safe_z={safe_z:.3f} "
-                        f"ff_y={ff_y:.1f} N (rel from cur_y={cur_y:.4f})"
+                        f"ff_y={ff_y:.1f} N"
                     )
-                    # Bug 116: each step's residual converges to a 21–22 mm
-                    # floor regardless of iteration count (sim 04-30c).  Cap
-                    # per-step time at 14 s so the 7-step lateral can't burn
-                    # 200 s of the trial budget.  Stall detection still fires
-                    # when the arm hits cable equilibrium; if the per-step
-                    # timeout trips first (OutOfReachError) we move on to the
-                    # next sub-step.  Bug 106 retry then runs once at the end
-                    # with stronger feedforward.
-                    try:
-                        self._move_to_pose_and_wait(
-                            self._make_pose(tgt_x + bias_dx, step_y + bias_dy, safe_z, orient),
-                            move_robot, get_observation, start_time, time_limit_sec,
-                            convergence_m=0.015, stage_timeout_sec=14.0,
-                            label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
-                            check_force=False,
-                            feedforward_fy=ff_y,
-                            stiffness_xyz=lateral_stiffness,
-                        )
-                    except OutOfReachError:
-                        pass
+                    # Bug 116 REVERTED 14 → 30 s after sim 2026-05-01 (we
+                    # also reverted Bug 117 to absolute targets which need
+                    # the full move time).
+                    self._move_to_pose_and_wait(
+                        self._make_pose(tgt_x + bias_dx, step_y + bias_dy, safe_z, orient),
+                        move_robot, get_observation, start_time, time_limit_sec,
+                        convergence_m=0.015, stage_timeout_sec=30.0,
+                        label=f"Stage 1 SFP T2 WP2 step {step_idx}/{n_split} lateral",
+                        check_force=False,
+                        feedforward_fy=ff_y,
+                        stiffness_xyz=lateral_stiffness,
+                    )
                     obs_wp = get_observation()
                     if obs_wp:
                         orient = obs_wp.controller_state.tcp_pose.orientation
@@ -1676,31 +1670,22 @@ class ANT(Policy):
             f"{lateral_stiffness if lateral_stiffness is not None else 'default'} "
             f"anchor_bias=({bias_dx*1000:+.1f},{bias_dy*1000:+.1f})mm"
         )
-        # Bug 117: relative sub-step targets for SC lateral too.
-        step_dx_per_sub = (base_x - step_x) / float(n_steps)
-        step_dy_per_sub = (base_y - step_y) / float(n_steps)
+        # Bug 117 REVERTED for SC too (same reason as T2 SFP).  Absolute
+        # targets ensure the sub-step ladder accumulates real progress
+        # toward (base_x, base_y) regardless of per-step undershoot.
         for sub in range(1, n_steps + 1):
-            obs_sub_pre = get_observation()
-            if obs_sub_pre is not None:
-                cur_x = obs_sub_pre.controller_state.tcp_pose.position.x
-                cur_y = obs_sub_pre.controller_state.tcp_pose.position.y
-            else:
-                cur_x = step_x + step_dx_per_sub * (sub - 1)
-                cur_y = step_y + step_dy_per_sub * (sub - 1)
-            tgt_x = cur_x + step_dx_per_sub + bias_dx
-            tgt_y = cur_y + step_dy_per_sub + bias_dy
-            try:
-                self._move_to_pose_and_wait(
-                    self._make_pose(tgt_x, tgt_y, lateral_z, orient),
-                    move_robot, get_observation, start_time, time_limit_sec,
-                    convergence_m=0.015, stage_timeout_sec=14.0,
-                    label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (z={lateral_z:.3f})",
-                    check_force=False,
-                    feedforward_fy=ff_y,
-                    stiffness_xyz=lateral_stiffness,
-                )
-            except OutOfReachError:
-                pass
+            t = sub / n_steps
+            tgt_x = step_x + (base_x - step_x) * t + bias_dx
+            tgt_y = step_y + (base_y - step_y) * t + bias_dy
+            self._move_to_pose_and_wait(
+                self._make_pose(tgt_x, tgt_y, lateral_z, orient),
+                move_robot, get_observation, start_time, time_limit_sec,
+                convergence_m=0.015, stage_timeout_sec=20.0,
+                label=f"Stage 1 WP2 sub-step {sub}/{n_steps} (z={lateral_z:.3f})",
+                check_force=False,
+                feedforward_fy=ff_y,
+                stiffness_xyz=lateral_stiffness,
+            )
             obs_sub = get_observation()
             if obs_sub is not None:
                 orient = obs_sub.controller_state.tcp_pose.orientation
@@ -2428,8 +2413,16 @@ class ANT(Policy):
         # dangerously close to the 1.0 s force-penalty threshold (−12). Reverting
         # to −5 N keeps SC peak force under ~45 N (v11 measured 42.5 N) with no
         # change in T3 outcome (force-abort fires either way until Bug 66 is fixed).
+        # Bug 119: lower SC ff_z from −5 N → −3 N after sim 2026-05-01 saw
+        # T3 |F| sustained 19.5–20.5 N for 120 s (ambient cable tension
+        # ~19.6 N + −5 N feedforward put the controller right at the cliff).
+        # −3 N still breaks the cable equilibrium (sim 04-30c had T3 descent
+        # of 1.8 cm with ff_z=−5 N) but leaves 2 N more headroom under the
+        # 20 N penalty threshold.  T2 keeps −9 N because at T2's stall
+        # height the spring force is only 13 N and the extra push is
+        # needed; force-cliff guard (Bug 110 v2) decays it if needed.
         if zone == "sc":
-            stage4_feedforward_fz = -5.0
+            stage4_feedforward_fz = -3.0
         elif self._insert_call_count == 2:   # T2: SFP at -45° yaw, higher cable tension
             stage4_feedforward_fz = -9.0
         else:
@@ -2464,9 +2457,11 @@ class ANT(Policy):
         # Bug 104 (I): per-orbit z-descent counter for 'descend' mode.
         orbits_completed = 0.0
         descend_z_offset = 0.0
-        # Bug 110: force-cliff guard accumulated cmd_z back-off.
-        force_guard_offset_z = 0.0
+        # Bug 110 v2: smooth feedforward_fz decay when |F| sustained high.
         force_guard_high_start = None
+        force_guard_ff_factor = 1.0   # 1.0 = full ff_z; 0.0 = ff_z=0
+        force_guard_last_sample_t = None
+        force_guard_logged = False
         self.get_logger().info(
             f"Stage 4: active-insertion enabled (Bug 98+100+101+104) — "
             f"mode={stage4_mode} xy_err={xy_err*1000:.1f}mm "
@@ -2549,9 +2544,10 @@ class ANT(Policy):
                 phase = 2.0 * np.pi * (elapsed_stage - self.stage4_settle_sec) / period
                 cmd_z_now = cmd_z_now + amp * np.sin(phase)
 
-            # Bug 110: force-cliff guard.  Apply accumulated back-off raise so
-            # SC Stage 4 doesn't sit at the 20 N penalty cliff for 120 s.
-            cmd_z_now = cmd_z_now + force_guard_offset_z
+            # Bug 110 v2: smooth feedforward_fz decay (computed below after
+            # we read |F|; here we apply the current factor so the motion
+            # update sees a continuous wrench).
+            ff_z_now = stage4_feedforward_fz * force_guard_ff_factor
 
             target_pose = self._make_pose(
                 start_x + spiral_dx + grad_dx,
@@ -2570,11 +2566,11 @@ class ANT(Policy):
                     rot_stiffness=(sx * 0.5, sx * 0.5, sx * 0.5),
                     damping_xyz=(sx * 0.6, sx * 0.6, sz * 0.6),
                     rot_damping=(sx * 0.3, sx * 0.3, sx * 0.3),
-                    feedforward_fz=stage4_feedforward_fz,
+                    feedforward_fz=ff_z_now,
                 )
             else:
                 motion_update = self._build_motion_update(
-                    target_pose, stiffness, feedforward_fz=stage4_feedforward_fz
+                    target_pose, stiffness, feedforward_fz=ff_z_now
                 )
             try:
                 move_robot(motion_update=motion_update)
@@ -2628,41 +2624,56 @@ class ANT(Policy):
                 f"{spiral_tag}{grad_tag}"
             )
 
-            # Bug 110: force-cliff guard.  When |F| stays above threshold for
-            # `guard_sustained_sec`, raise cmd_z by `guard_backoff_m` (capped).
-            # When |F| drops back below `recover_n`, decay the offset back
-            # toward 0 so the arm tries to descend again as cable slackens.
+            # Bug 110 v2: smooth feedforward_fz decay when |F| sustained
+            # high.  Replaces the original stepped cmd_z raises (caused
+            # infinite-jerk discontinuities, zeroed T3 smoothness in
+            # 05-01).  When |F| > threshold for sustained_sec, ramp
+            # `force_guard_ff_factor` down toward 0 at decay_per_sec
+            # (interpreted as N/s of |ff_z| reduction).  When |F| recovers
+            # below recover_n, ramp factor back up at recover_per_sec.
+            # Continuous → low jerk; directly removes the only downward
+            # contribution we control (cable tension is uncontrollable).
             now_t = self.time_now()
+            dt_guard = 0.05  # default, refined below
+            if force_guard_last_sample_t is not None:
+                dt_guard = max(
+                    0.001,
+                    (now_t - force_guard_last_sample_t).nanoseconds / 1e9,
+                )
+            force_guard_last_sample_t = now_t
+            ff_base_abs = max(0.001, abs(stage4_feedforward_fz))
             if self.stage4_force_guard_enable:
                 if force_abs > self.stage4_force_guard_threshold_n:
                     if force_guard_high_start is None:
                         force_guard_high_start = now_t
                     fg_duration = (now_t - force_guard_high_start).nanoseconds / 1e9
                     if fg_duration >= self.stage4_force_guard_sustained_sec:
-                        new_off = min(
-                            self.stage4_force_guard_max_backoff_m,
-                            force_guard_offset_z + self.stage4_force_guard_backoff_m,
-                        )
-                        if new_off > force_guard_offset_z:
-                            force_guard_offset_z = new_off
+                        decay_n = self.stage4_force_guard_ff_decay_per_sec * dt_guard
+                        decay_factor_step = decay_n / ff_base_abs
+                        new_factor = max(0.0, force_guard_ff_factor - decay_factor_step)
+                        if new_factor < force_guard_ff_factor and not force_guard_logged:
                             self.get_logger().warning(
                                 f"Stage 4: force-cliff guard — |F|={force_abs:.2f} N "
-                                f"> {self.stage4_force_guard_threshold_n:.1f} N for "
-                                f"{fg_duration:.1f} s; raising cmd_z by "
-                                f"{self.stage4_force_guard_backoff_m*1000:.1f} mm "
-                                f"(total backoff +{force_guard_offset_z*1000:.1f} mm)"
+                                f"> {self.stage4_force_guard_threshold_n:.1f} N "
+                                f"sustained {fg_duration:.1f} s; decaying ff_z "
+                                f"({stage4_feedforward_fz:.1f} N) factor "
+                                f"{force_guard_ff_factor:.2f}→{new_factor:.2f}"
                             )
-                        force_guard_high_start = now_t  # reset window
+                            force_guard_logged = True
+                        force_guard_ff_factor = new_factor
                 else:
                     force_guard_high_start = None
                     if (
                         force_abs < self.stage4_force_guard_recover_n
-                        and force_guard_offset_z > 0.0
+                        and force_guard_ff_factor < 1.0
                     ):
-                        force_guard_offset_z = max(
-                            0.0,
-                            force_guard_offset_z - self.stage4_force_guard_backoff_m * 0.5,
+                        recover_n = self.stage4_force_guard_ff_recover_per_sec * dt_guard
+                        recover_factor_step = recover_n / ff_base_abs
+                        force_guard_ff_factor = min(
+                            1.0, force_guard_ff_factor + recover_factor_step,
                         )
+                        if force_guard_ff_factor >= 1.0:
+                            force_guard_logged = False  # allow re-log if guard fires again
 
             # Bug 98 + Bug 109: slack-detection early exit.  Sustained |F|
             # drop below (baseline − slack_drop_n) means the port wall is
