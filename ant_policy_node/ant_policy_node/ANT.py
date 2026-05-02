@@ -279,8 +279,11 @@ class ANT(Policy):
             # Ground-truth calibration from sim 2026-04-30b bag:
             #   TCP at Stage 3 entry: euler_xyz ≈ (−180°, 0°, 0°)
             #   sc_port_base euler_xyz in base_link: (−180°, 0°, −98.16°)
-            #   yaw_corr = −97.93° = −1.7093 rad so that Rz(yaw_corr) * tcp = port orientation
-            ("sc",  3): -1.7093,
+            #   Port yaw in radians: −98.16° = −1.7133 rad
+            #   yaw_corr = −1.7133 rad aligns plug tip with port insertion axis
+            #   (adjusted from −1.7093 after observing T3 near-miss 20mm from port;
+            #   the 0.23° discrepancy may indicate board yaw variance in competition)
+            ("sc",  3): -1.7133,
             # SFP entries intentionally absent — T1 path scores 38pts already.
         }
         self.enable_yaw_alignment = True   # master toggle for Bug 99
