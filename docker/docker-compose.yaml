@@ -15,7 +15,7 @@ services:
       AIC_MODEL_PASSWD: ${AIC_TEST_PASSWD:-aic_local_dev_2026}
       AIC_ENABLE_ACL: "true"
   model:
-    image: ant-policy:v21
+    image: ant-policy:v22
     build:
       dockerfile: docker/ant_policy_node/Dockerfile
       context: ..
