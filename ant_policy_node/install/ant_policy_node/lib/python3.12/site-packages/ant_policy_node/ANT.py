@@ -343,6 +343,23 @@ class ANT(Policy):
         # with increased descent_stiffness (85 -> 150 N/m) for two-part fix.
         self.stage3_sfp_feedforward_fz = -6.5  # N — downward push for descent
 
+        # ---- Bug 121: Stage 4 stiffness ramp to prevent transition spike ---
+        # v21 sim showed T1 force spike of 49.48N for 0.02s (just under the
+        # 1.0s penalty threshold). Root cause: Stage 3 ends with stiffness
+        # 85-150 N/m; Stage 4 starts at 200 N/m. The sudden 2.4x increase
+        # combined with 10cm position error creates a brief impulse that
+        # the controller measures as ~50N transient.
+        #
+        # Fix: linearly ramp Stage 4 stiffness from approach_stiffness to
+        # insertion_stiffness over `stage4_stiffness_ramp_sec`. This gives
+        # the impedance controller time to settle into the higher stiffness
+        # without an impulse. The mean spring force during the ramp is the
+        # average of (Stage 3 end stiffness) and (Stage 4 target stiffness),
+        # which keeps net downward force consistent.
+        # SC keeps approach_stiffness throughout (Bug 74) so no ramp needed.
+        self.stage4_stiffness_ramp_enable = True
+        self.stage4_stiffness_ramp_sec = 1.0  # ramp duration
+
         # ---- Bug 103 (H): cable-anchor cue for Y-bias on high-tension day --
         # The cable anchor on the BOARD side biases the plug's equilibrium
         # XY: a high-tension cable pulls the gripper toward the anchor, so
@@ -2582,6 +2599,23 @@ class ANT(Policy):
                 cmd_z_now,
                 contact_pose.orientation,
             )
+            # Bug 121: ramp Stage 4 stiffness from approach_stiffness to the
+            # target stiffness over `stage4_stiffness_ramp_sec` to avoid the
+            # 2.4x sudden jump (85->200 N/m) that creates a 49N+ transient
+            # force spike during Stage 3->Stage 4 transition. SC zone uses
+            # approach_stiffness throughout so the ramp effectively no-ops.
+            if (
+                self.stage4_stiffness_ramp_enable
+                and zone != "sc"
+                and elapsed_stage < self.stage4_stiffness_ramp_sec
+            ):
+                ramp_progress = elapsed_stage / max(0.001, self.stage4_stiffness_ramp_sec)
+                stiffness_now = (
+                    self.approach_stiffness
+                    + (stiffness - self.approach_stiffness) * ramp_progress
+                )
+            else:
+                stiffness_now = stiffness
             if self.stage4_compliance_enable:
                 # Bug 101 (C): low XY stiffness so chamfer can guide plug;
                 # modest Z stiffness keeps a controllable spring force.
@@ -2597,7 +2631,7 @@ class ANT(Policy):
                 )
             else:
                 motion_update = self._build_motion_update(
-                    target_pose, stiffness, feedforward_fz=ff_z_now
+                    target_pose, stiffness_now, feedforward_fz=ff_z_now
                 )
             try:
                 move_robot(motion_update=motion_update)
