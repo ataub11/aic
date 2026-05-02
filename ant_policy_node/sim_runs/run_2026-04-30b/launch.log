@@ -1,0 +1,59 @@
+1777589125.1330955 [INFO] [launch]: All log files can be found below /home/ataub/.ros/log/2026-04-30-15-45-25-132141-aic_eval.cobalt-453381
+1777589125.1332006 [INFO] [launch]: Default logging verbosity is set to INFO
+1777589126.0350373 [INFO] [robot_state_publisher-1]: process started with pid [453454]
+1777589126.0352502 [INFO] [aic_adapter-2]: process started with pid [453455]
+1777589126.0353804 [INFO] [component_container-3]: process started with pid [453456]
+1777589126.0355031 [INFO] [gz-4]: process started with pid [453457]
+1777589126.0356207 [INFO] [create-5]: process started with pid [453458]
+1777589126.0357306 [INFO] [relay-6]: process started with pid [453459]
+1777589126.0358360 [INFO] [static_transform_publisher-7]: process started with pid [453460]
+1777589126.0359423 [INFO] [aic_engine-8]: process started with pid [453461]
+1777589126.0848198 [robot_state_publisher-1] [INFO] [1777589126.084475570] [robot_state_publisher]: Robot initialized
+1777589126.0857821 [aic_adapter-2] [INFO] [1777589126.085560158] [aic_adapter_node]: Adapter node initialization complete.
+1777589126.1490014 [INFO] [launch_ros.actions.load_composable_nodes]: Loaded node '/gz_server' in container '/ros_gz_container'
+1777589126.1907182 [INFO] [launch_ros.actions.load_composable_nodes]: Loaded node '/ros_gz_bridge' in container 'ros_gz_container'
+1777589128.6024451 [INFO] [create-5]: process has finished cleanly [pid 453458]
+1777589128.6062577 [INFO] [spawner-9]: process started with pid [453641]
+1777589128.6064422 [INFO] [spawner-10]: process started with pid [453642]
+1777589129.0133774 [spawner-9] [INFO] [1777589129.013117207] [spawner_joint_state_broadcaster]: Loaded joint_state_broadcaster
+1777589130.9784706 [spawner-9] [INFO] [1777589130.978164485] [spawner_joint_state_broadcaster]: Configured and activated joint_state_broadcaster
+1777589131.0442266 [INFO] [spawner-9]: process has finished cleanly [pid 453641]
+1777589131.0463150 [INFO] [spawner-11]: process started with pid [453827]
+1777589131.5443156 [spawner-10] [INFO] [1777589131.543863803] [spawner_fts_broadcaster]: Loaded fts_broadcaster
+1777589136.4925408 [spawner-10] [INFO] [1777589136.492136284] [spawner_fts_broadcaster]: Configured and activated fts_broadcaster
+1777589136.5898535 [INFO] [spawner-10]: process has finished cleanly [pid 453642]
+1777589137.3942795 [spawner-11] [INFO] [1777589137.394090287] [spawner_aic_controller]: Loaded aic_controller
+1777589138.1624813 [spawner-11] [INFO] [1777589138.162132679] [spawner_aic_controller]: Configured and activated all the parsed controllers list : ['aic_controller']!
+1777589138.2314403 [INFO] [spawner-11]: process has finished cleanly [pid 453827]
+1777589138.2333624 [INFO] [rviz2-12]: process started with pid [453952]
+1777589138.3610196 [rviz2-12] Gtk-Message: 15:45:38.360: Failed to load module "canberra-gtk-module"
+1777589138.3612747 [rviz2-12] Gtk-Message: 15:45:38.361: Failed to load module "canberra-gtk-module"
+1777589138.4106789 [rviz2-12] _IceTransSocketUNIXConnect: Cannot connect to non-local host cobalt
+1777589138.4687335 [rviz2-12] _IceTransSocketUNIXConnect: Cannot connect to non-local host cobalt
+1777589138.4691393 [rviz2-12] Qt: Session management error: Could not open network socket
+1777589139.0199902 [rviz2-12] [INFO] [1777589139.019693585] [rviz2]: Stereo is NOT SUPPORTED
+1777589139.0204172 [rviz2-12] [INFO] [1777589139.019880873] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+1777589139.0602281 [rviz2-12] [INFO] [1777589139.060018923] [rviz2]: Stereo is NOT SUPPORTED
+1777589144.9397581 [rviz2-12] [INFO] [1777589144.939522454] [rviz2]: Stereo is NOT SUPPORTED
+1777599375.8610456 [INFO] [aic_engine-8]: process has finished cleanly [pid 453461]
+1777599647.6978965 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1777599648.5735078 [rviz2-12] [INFO] [1777599647.697688572] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+1777599648.5746355 [INFO] [relay-6]: process has finished cleanly [pid 453459]
+1777599648.5751460 [INFO] [static_transform_publisher-7]: process has finished cleanly [pid 453460]
+1777599648.5756328 [INFO] [robot_state_publisher-1]: process has finished cleanly [pid 453454]
+1777599648.5760927 [INFO] [aic_adapter-2]: process has finished cleanly [pid 453455]
+1777599648.5765440 [INFO] [rviz2-12]: process has finished cleanly [pid 453952]
+1777599648.5770547 [ERROR] [component_container-3]: process has died [pid 453456, exit code -6, cmd '/opt/ros/kilted/lib/rclcpp_components/component_container --ros-args -r __node:=ros_gz_container -r __ns:=/'].
+1777599648.5784435 [aic_adapter-2] [INFO] [1777599647.697700729] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+1777599648.5796602 [robot_state_publisher-1] [INFO] [1777599647.698148853] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+1777599648.5828767 [rviz2-12] MESA: error: dri3_alloc_render_buffer:1626 xcb_dri3_pixmap_from_buffer[s] failed
+1777599648.5834079 [rviz2-12] MESA: error: X error: 9
+1777599648.5836658 [rviz2-12] MESA: error: dri3_alloc_render_buffer:1626 xcb_dri3_pixmap_from_buffer[s] failed
+1777599648.5838592 [rviz2-12] MESA: error: X error: 9
+1777599648.5840356 [rviz2-12] MESA: error: dri3_alloc_render_buffer:1626 xcb_dri3_pixmap_from_buffer[s] failed
+1777599648.5842054 [rviz2-12] MESA: error: X error: 9
+1777599653.5786068 [ERROR] [gz-4]: process[gz-4] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+1777599653.5825343 [INFO] [gz-4]: sending signal 'SIGTERM' to process[gz-4]
+1777599658.5778365 [ERROR] [gz-4]: process[gz-4] failed to terminate '10.0' seconds after receiving 'SIGTERM', escalating to 'SIGKILL'
+1777599658.5810444 [INFO] [gz-4]: sending signal 'SIGKILL' to process[gz-4]
+1777599658.6409028 [ERROR] [gz-4]: process has died [pid 453457, exit code -9, cmd 'gz sim -g'].

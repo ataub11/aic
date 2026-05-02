@@ -1,0 +1,18 @@
+{"event": "startup", "trial": 0, "build_version": "local-61646a0", "high_tension_threshold_n": 19.0, "lateral_feedforward_n": 6.0, "t2_sfp_steps": 7, "t3_sc_step_m": 0.025, "lateral_stiff_n_per_m": 350.0, "anchor_bias_m": 0.02, "arrival_tolerance_m": 0.025, "arrival_max_retries": 2, "stage4_compliance": false, "yaw_alignment": true, "vision_sc": true}
+{"event": "trial_start", "trial": 1, "task_id": "task_1", "plug_name": "sfp_tip", "port_name": "sfp_port_0", "plug_type": "sfp", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 1, "baseline_n": 20.82117086490949, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "baseline", "trial": 1, "baseline_n": 19.526761579710715, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 1, "success": true, "final_tcp_x": -0.3841997229281162, "final_tcp_y": 0.19350000448838214, "final_tcp_z": 0.2317715452859838}
+{"event": "trial_start", "trial": 2, "task_id": "task_1", "plug_name": "sfp_tip", "port_name": "sfp_port_0", "plug_type": "sfp", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 2, "baseline_n": 20.69500763662287, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "lateral_arrival", "trial": 2, "zone": "sfp", "label": "Stage 1 SFP T2 WP2", "attempt": 0, "tgt_x": -0.40442984795420284, "tgt_y": 0.25092633321047575, "actual_x": -0.40472984235959547, "actual_y": 0.2291639934957489, "err_mm": 21.764407331752558, "tolerance_mm": 25.0, "within_tol": true}
+{"event": "baseline", "trial": 2, "baseline_n": 20.419582721928702, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 2, "success": true, "final_tcp_x": -0.38936607885366814, "final_tcp_y": 0.2742148456461425, "final_tcp_z": 0.1772106484057916}
+{"event": "trial_start", "trial": 3, "task_id": "task_1", "plug_name": "sc_tip", "port_name": "sc_port_base", "plug_type": "sc", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 3, "baseline_n": 20.147883531889953, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "lateral_arrival", "trial": 3, "zone": "sc", "label": "Stage 1 SC WP2", "attempt": 0, "tgt_x": -0.3945830417660513, "tgt_y": 0.4131956096880039, "actual_x": -0.40404628287276756, "actual_y": 0.3442980698684002, "err_mm": 69.54440254569535, "tolerance_mm": 25.0, "within_tol": false}
+{"event": "lateral_arrival_retry", "trial": 3, "zone": "sc", "label": "Stage 1 SC WP2", "attempt": 1, "tgt_x": -0.3945830417660513, "tgt_y": 0.4131956096880039, "actual_x": -0.40404628287276756, "actual_y": 0.3442980698684002, "err_mm": 69.54440254569535, "ff_y": 9.0, "stiff_n_per_m": 400.0}
+{"event": "lateral_arrival_retry", "trial": 3, "zone": "sc", "label": "Stage 1 SC WP2", "attempt": 2, "tgt_x": -0.3945830417660513, "tgt_y": 0.4131956096880039, "actual_x": -0.4040377409553905, "actual_y": 0.3451671043069792, "err_mm": 68.68237678718606, "ff_y": 9.0, "stiff_n_per_m": 450.0}
+{"event": "lateral_arrival_final", "trial": 3, "zone": "sc", "label": "Stage 1 SC WP2", "tgt_x": -0.3945830417660513, "tgt_y": 0.4131956096880039, "actual_x": -0.4036281421791001, "actual_y": 0.34476301090259615, "err_mm": 69.0277800454768, "within_tol": false}
+{"event": "baseline", "trial": 3, "baseline_n": 20.147883531889953, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 3, "success": true, "final_tcp_x": -0.38382059236780547, "final_tcp_y": 0.4282219739424904, "final_tcp_z": 0.06058598638349036}

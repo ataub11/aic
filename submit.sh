@@ -45,15 +45,39 @@ echo "=== Step 1: Building image ${LOCAL_TAGGED} ==="
 sed -i "s|image: ant-policy:.*|image: ${LOCAL_TAGGED}|" "$DOCKER_COMPOSE_FILE"
 # Inject the current git SHA (with a -dirty suffix when the tree has
 # uncommitted changes) as BUILD_VERSION; ANT.py logs it on startup so every
-# eval log identifies the exact code that shipped.  Falls back gracefully if
-# git isn't available or this isn't a repo.
+# eval log identifies the exact code that shipped.
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [[ "$GIT_SHA" != "unknown" ]] && ! git diff --quiet HEAD 2>/dev/null; then
   GIT_SHA="${GIT_SHA}-dirty"
 fi
+if [[ "$GIT_SHA" == "unknown" ]]; then
+  echo "Error: git rev-parse failed — refusing to ship a build_version=unknown image."
+  echo "Run submit.sh from inside the aic git checkout."
+  exit 1
+fi
 export BUILD_VERSION="${TAG}-${GIT_SHA}"
 echo "BUILD_VERSION=${BUILD_VERSION}"
-docker compose -f "$DOCKER_COMPOSE_FILE" build model
+
+# Drop any prior image with this tag and bust BuildKit cache so the
+# ARG BUILD_VERSION layer (and the source COPY layers) are rebuilt fresh.
+# Without this, Docker happily reuses a cached early layer that baked in
+# BUILD_VERSION=unknown, and the running container reports the wrong SHA
+# even though the source COPY layers were rebuilt.
+docker image rm "${LOCAL_TAGGED}" >/dev/null 2>&1 || true
+docker compose -f "$DOCKER_COMPOSE_FILE" build --no-cache --pull model
+
+# Verify BUILD_VERSION actually made it into the image's environment.
+# The Dockerfile sets ENV ANT_BUILD_VERSION=${BUILD_VERSION}; if that ended
+# up as "unknown" the image is unshippable per CLAUDE.md.
+BAKED_VERSION="$(docker image inspect "${LOCAL_TAGGED}" \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | awk -F= '/^ANT_BUILD_VERSION=/ {print $2}')"
+echo "Baked ANT_BUILD_VERSION=${BAKED_VERSION}"
+if [[ "$BAKED_VERSION" != "$BUILD_VERSION" ]]; then
+  echo "Error: image baked with ANT_BUILD_VERSION='${BAKED_VERSION}', expected '${BUILD_VERSION}'."
+  echo "Aborting before push so we don't ship a misidentified image."
+  exit 1
+fi
 
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
 if [[ "$SKIP_VERIFY" == "false" ]]; then
