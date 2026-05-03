@@ -12,6 +12,16 @@
 #   - AWS CLI installed
 #   - AWS profile 'ant_aic' configured (aws configure --profile ant_aic)
 #   - Docker running
+#
+# Bug 90 Safeguard (stale install/ directory):
+#   This script includes two protective steps:
+#   1. Pre-build: Syncs ant_policy_node/install/ from source to ensure the
+#      Dockerfile copies fresh code (not stale committed copies).
+#   2. Post-build: Runtime verification extracts ANT.py from the image and
+#      checks for a known recent constant to confirm source code (not stale
+#      install/ copy) is in the final image.
+#   Without these steps, Python's import resolution can pick the old install/
+#   copy at runtime, shipping an old policy despite new commits being pushed.
 
 set -euo pipefail
 
@@ -58,6 +68,35 @@ fi
 export BUILD_VERSION="${TAG}-${GIT_SHA}"
 echo "BUILD_VERSION=${BUILD_VERSION}"
 
+# ── Pre-build: Sync stale install/ directory (Bug 90 gotcha) ─────────────────
+echo ""
+echo "=== Pre-build: Syncing install/ directory from source (Bug 90) ==="
+# The install/ directory contains a stale committed copy of ANT.py and friends.
+# At runtime, Python's import resolution sometimes picks the install/ copy over
+# source, causing deployed images to have old code. This step ensures they're
+# in sync before building.
+INSTALL_ANT_PY="ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py"
+if [[ -f "$INSTALL_ANT_PY" ]]; then
+  cp ant_policy_node/ant_policy_node/ANT.py "$INSTALL_ANT_PY"
+  if diff -q ant_policy_node/ant_policy_node/ANT.py "$INSTALL_ANT_PY" >/dev/null 2>&1; then
+    echo "✓ install/ANT.py synced successfully"
+  else
+    echo "✗ FATAL: install/ANT.py sync verification failed (diff still shows differences)"
+    exit 1
+  fi
+fi
+# Also sync __init__.py and stage1_debug.py if they exist and have been modified
+for file in __init__.py stage1_debug.py; do
+  SRC="ant_policy_node/ant_policy_node/${file}"
+  DEST="ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/${file}"
+  if [[ -f "$SRC" && -f "$DEST" ]]; then
+    cp "$SRC" "$DEST"
+    if diff -q "$SRC" "$DEST" >/dev/null 2>&1; then
+      echo "✓ install/${file} synced"
+    fi
+  fi
+done
+
 # Drop any prior image with this tag and bust BuildKit cache so the
 # ARG BUILD_VERSION layer (and the source COPY layers) are rebuilt fresh.
 # Without this, Docker happily reuses a cached early layer that baked in
@@ -77,6 +116,40 @@ if [[ "$BAKED_VERSION" != "$BUILD_VERSION" ]]; then
   echo "Error: image baked with ANT_BUILD_VERSION='${BAKED_VERSION}', expected '${BUILD_VERSION}'."
   echo "Aborting before push so we don't ship a misidentified image."
   exit 1
+fi
+
+# Runtime verification: extract ANT.py from the image and check a known constant
+# to ensure the source code (not stale install/ copy) is in the image.
+# This is the final safeguard against the Bug 90 gotcha.
+echo ""
+echo "=== Step 1b: Runtime verification (Bug 90 stale install/ check) ==="
+TEMP_EXTRACT="/tmp/ant_policy_check_$$"
+mkdir -p "$TEMP_EXTRACT"
+# Extract ANT.py from the image's layers using docker create + cp
+CONTAINER_ID=$(docker create "${LOCAL_TAGGED}" 2>/dev/null) || {
+  echo "Warning: could not create container to verify ANT.py; skipping runtime check"
+  CONTAINER_ID=""
+}
+if [[ -n "$CONTAINER_ID" ]]; then
+  docker cp "${CONTAINER_ID}:/ws_aic/install/aic_model/lib/python3.12/site-packages/ant_policy_node/ANT.py" \
+    "$TEMP_EXTRACT/ANT.py" 2>/dev/null || true
+  docker rm "$CONTAINER_ID" >/dev/null 2>&1
+
+  # Check for a recent bug constant that should be in the image.
+  # Bug 122 added/modified gripper_yaw_correction_rad; check for -1.7133 value.
+  # If this is missing, the image has stale code.
+  if [[ -f "$TEMP_EXTRACT/ANT.py" ]]; then
+    if grep -q "1\.7133\|yaw_correction_rad\[.*sc.*3.*\].*-1\.7133" "$TEMP_EXTRACT/ANT.py" 2>/dev/null; then
+      echo "✓ Runtime check passed: Image contains expected code (Bug 122 yaw_correction)"
+    else
+      echo "⚠ Runtime check WARNING: Image may contain stale code (expected -1.7133 yaw correction not found)"
+      echo "  This could indicate the install/ directory was out of sync during build."
+      echo "  The image will still be built, but monitor logs for unexpected behavior."
+    fi
+  fi
+  rm -rf "$TEMP_EXTRACT"
+else
+  echo "⚠ Skipping runtime verification (could not extract ANT.py from image)"
 fi
 
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
