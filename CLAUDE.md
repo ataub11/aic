@@ -24,7 +24,7 @@ resolution sometimes picks up the install/ copy over the source.
 **Symptom**: Stage 4 log shows `feedforward_fz=0.0 N` and budget `0.3 s`
 even though source has `−5.0 N` and `0.5 s` for SC.
 
-**Fix**: After editing `ant_policy_node/ant_policy_node/ANT.py`, also run
+**Manual fix (deprecated — now automated)**: After editing `ant_policy_node/ant_policy_node/ANT.py`, also run
 
     cp ant_policy_node/ant_policy_node/ANT.py \
        ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py
@@ -32,6 +32,18 @@ even though source has `−5.0 N` and `0.5 s` for SC.
 Same for `__init__.py` and `stage1_debug.py` if they change. Verify with
 `diff -q` before committing. Long-term fix is to remove install/ from git
 and have the Dockerfile do a fresh colcon build, but that's deferred.
+
+**Automated safeguard (May 2026)**: `submit.sh` now includes two protective steps:
+1. **Pre-build sync** — Before docker build, automatically syncs `ant_policy_node/ANT.py`
+   and friends to `install/` and verifies with `diff -q`.
+2. **Post-build verification** — After docker build, extracts `ANT.py` from the image
+   and greps for a known recent constant (e.g., Bug 122's `-1.7133` yaw correction).
+   If missing, emits a warning that the image contains stale code before ECR push.
+
+This prevents the silent failure mode where commits are pushed, build appears
+successful, but the deployed image contains old code (observed in v20/v21
+competition submissions). Always run `./submit.sh <tag>` directly — never
+`docker compose build` manually.
 
 ## Score progression key milestones
 
