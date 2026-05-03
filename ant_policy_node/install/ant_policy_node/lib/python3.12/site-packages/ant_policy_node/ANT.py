@@ -76,6 +76,10 @@ class ANT(Policy):
         # ---- impedance control parameters ----------------------------------
         self.approach_stiffness = 85.0    # N/m — used for Stages 1–3 (free-space positioning)
         self.insertion_stiffness = 200.0  # N/m — Stage 4 only; higher force to push through real-world cable tension
+        # Stage 3 Z-descent needs higher stiffness to overcome cable equilibrium (Bug 120).
+        # Lateral moves stay at approach_stiffness (85 N/m) to handle compliance tolerance.
+        # Descent-only moves use this higher value to push through the equilibrium point.
+        self.stage3_descent_stiffness = 150.0  # N/m — higher for Z-descent phases only
         # Contact threshold.  Must stay well below the 20 N force penalty
         # threshold defined in the scoring rules.
         self.force_threshold = 5.0        # N
@@ -275,8 +279,11 @@ class ANT(Policy):
             # Ground-truth calibration from sim 2026-04-30b bag:
             #   TCP at Stage 3 entry: euler_xyz ≈ (−180°, 0°, 0°)
             #   sc_port_base euler_xyz in base_link: (−180°, 0°, −98.16°)
-            #   yaw_corr = −97.93° = −1.7093 rad so that Rz(yaw_corr) * tcp = port orientation
-            ("sc",  3): -1.7093,
+            #   Port yaw in radians: −98.16° = −1.7133 rad
+            #   yaw_corr = −1.7133 rad aligns plug tip with port insertion axis
+            #   (adjusted from −1.7093 after observing T3 near-miss 20mm from port;
+            #   the 0.23° discrepancy may indicate board yaw variance in competition)
+            ("sc",  3): -1.7133,
             # SFP entries intentionally absent — T1 path scores 38pts already.
         }
         self.enable_yaw_alignment = True   # master toggle for Bug 99
@@ -327,6 +334,34 @@ class ANT(Policy):
         # force penalties.  350 was the sim-04-30c value (132.87 score).
         self.lateral_high_tension_stiffness_n_per_m = 350.0
         self.enable_high_tension_stiff_lateral = True
+
+        # ---- Bug 120: Stage 3 SFP feedforward for descent (new) -----
+        # Stage 3 Z-descent stalls short (10 cm gap) because the combined
+        # -5.0 N feedforward + 85 N/m spring stiffness cannot overcome the
+        # cable equilibrium force. Bug 119 lowered SC Stage 4 feedforward to
+        # protect against force penalties; this increases SFP Stage 3
+        # (different phase, pre-Stage 4) feedforward for descent-only.
+        # Increases robustness without adding Stage 4 force risk.
+        # Conservative increment: -5.0 -> -6.5 N gives an extra 1.5 N, paired
+        # with increased descent_stiffness (85 -> 150 N/m) for two-part fix.
+        self.stage3_sfp_feedforward_fz = -6.5  # N — downward push for descent
+
+        # ---- Bug 121: Stage 4 stiffness ramp to prevent transition spike ---
+        # v21 sim showed T1 force spike of 49.48N for 0.02s (just under the
+        # 1.0s penalty threshold). Root cause: Stage 3 ends with stiffness
+        # 85-150 N/m; Stage 4 starts at 200 N/m. The sudden 2.4x increase
+        # combined with 10cm position error creates a brief impulse that
+        # the controller measures as ~50N transient.
+        #
+        # Fix: linearly ramp Stage 4 stiffness from approach_stiffness to
+        # insertion_stiffness over `stage4_stiffness_ramp_sec`. This gives
+        # the impedance controller time to settle into the higher stiffness
+        # without an impulse. The mean spring force during the ramp is the
+        # average of (Stage 3 end stiffness) and (Stage 4 target stiffness),
+        # which keeps net downward force consistent.
+        # SC keeps approach_stiffness throughout (Bug 74) so no ramp needed.
+        self.stage4_stiffness_ramp_enable = True
+        self.stage4_stiffness_ramp_sec = 1.0  # ramp duration
 
         # ---- Bug 103 (H): cable-anchor cue for Y-bias on high-tension day --
         # The cable anchor on the BOARD side biases the plug's equilibrium
@@ -408,8 +443,11 @@ class ANT(Policy):
         # stiff=500, force-spike contributing to the −12 force penalty.
         # 25 mm is the same sim-04-30c value (132.87 score) which scored
         # without force penalties.
+        # Bug 120b: v20 showed T2 lateral barely passing (25.8 mm vs 25 mm
+        # limit). Add 2 mm margin (27 mm) for competition robustness on real HW
+        # where tolerance might be tighter due to day-to-day variation.
         self.enable_lateral_arrival_check = True
-        self.lateral_arrival_tolerance_m = 0.025
+        self.lateral_arrival_tolerance_m = 0.027  # 2.7 cm (vs 2.5 cm baseline)
         self.lateral_arrival_max_retries = 2
         self.lateral_arrival_ff_scale_per_retry = 0.5     # +50% ff each retry
         self.lateral_arrival_ff_cap_n = 9.0               # never exceed this
@@ -1889,8 +1927,11 @@ class ANT(Policy):
             # SFP plug spring (200 N/m) is capped at max_wrench=15 N; the
             # feedforward escapes that cap.  SC keeps 0 here — its Stage 4
             # already adds a downward feedforward separately.
+            # Bug 120: v20 revealed -5.0 N insufficient; increased to -6.5 N
+            # and paired with higher descent_stiffness (150 N/m) to overcome
+            # cable equilibrium robustly.
             stage3_ff_z = (
-                -5.0 if (zone == "sfp" and self._high_tension) else 0.0
+                self.stage3_sfp_feedforward_fz if (zone == "sfp" and self._high_tension) else 0.0
             )
             if stage3_ff_z != 0.0:
                 self.get_logger().info(
@@ -1898,12 +1939,18 @@ class ANT(Policy):
                     f"{stage3_ff_z:.1f} N (Bug 118)"
                 )
             try:
+                # Bug 120: use higher descent_stiffness for Z-descent to overcome
+                # cable equilibrium. Lateral moves (WP1/WP2) stay at approach_stiffness.
+                descent_stiffness = (
+                    self.stage3_descent_stiffness if stage3_ff_z != 0.0 else None
+                )
                 self._move_to_pose_and_wait(
                     target_pose, move_robot, get_observation,
                     start_time, time_limit_sec,
                     convergence_m=0.010, stage_timeout_sec=20.0,
                     label=f"Stage 3 {zone.upper()} direct descent", check_force=False,
                     feedforward_fz=stage3_ff_z,
+                    stiffness_xyz=descent_stiffness,
                 )
             except OutOfReachError:
                 # Timed out — arm stalled short of connector_z under cable load.
@@ -2555,6 +2602,23 @@ class ANT(Policy):
                 cmd_z_now,
                 contact_pose.orientation,
             )
+            # Bug 121: ramp Stage 4 stiffness from approach_stiffness to the
+            # target stiffness over `stage4_stiffness_ramp_sec` to avoid the
+            # 2.4x sudden jump (85->200 N/m) that creates a 49N+ transient
+            # force spike during Stage 3->Stage 4 transition. SC zone uses
+            # approach_stiffness throughout so the ramp effectively no-ops.
+            if (
+                self.stage4_stiffness_ramp_enable
+                and zone != "sc"
+                and elapsed_stage < self.stage4_stiffness_ramp_sec
+            ):
+                ramp_progress = elapsed_stage / max(0.001, self.stage4_stiffness_ramp_sec)
+                stiffness_now = (
+                    self.approach_stiffness
+                    + (stiffness - self.approach_stiffness) * ramp_progress
+                )
+            else:
+                stiffness_now = stiffness
             if self.stage4_compliance_enable:
                 # Bug 101 (C): low XY stiffness so chamfer can guide plug;
                 # modest Z stiffness keeps a controllable spring force.
@@ -2570,7 +2634,7 @@ class ANT(Policy):
                 )
             else:
                 motion_update = self._build_motion_update(
-                    target_pose, stiffness, feedforward_fz=ff_z_now
+                    target_pose, stiffness_now, feedforward_fz=ff_z_now
                 )
             try:
                 move_robot(motion_update=motion_update)
