@@ -37,6 +37,8 @@ from rclpy.time import Time
 from std_msgs.msg import Header
 from tf2_ros import TransformException
 
+from ant_policy_node import ur5e_kinematics
+
 
 class UnexpectedContactError(Exception):
     pass
@@ -455,6 +457,43 @@ class ANT(Policy):
         self.lateral_arrival_stiffness_cap_n_per_m = 500.0
         self.lateral_arrival_retry_timeout_sec = 18.0     # bounded so we don't burn budget
 
+        # ---- Bug 123: joint-space lateral via UR5e IK (v23) ----------------
+        # The Cartesian impedance controller's `maximum_wrench=15 N` cap
+        # (aic_ros2_controllers.yaml:53, applied at
+        # cartesian_impedance_action.cpp:82-83) is the root cause of T2's
+        # 0.17 m lateral stall on bad-tension days: cable equilibrium ≈ 25 N
+        # > controller ceiling → Cartesian impedance physically cannot push
+        # the arm to the port.  v22 confirmed: T2 = 1.0 (same as v18) despite
+        # Bug 106 retries, Bug 107 widened levers (350 N/m, 9 N feedforward),
+        # and Bug 103 anchor bias.  See cost-benefit analysis in CLAUDE.md
+        # "v22 architectural review" section.
+        #
+        # Joint-space (`JointMotionUpdate`) goes through `joint_impedance_action`
+        # which only clamps to UR5e per-joint torque limits (~150 Nm at the
+        # shoulder), translating through the Jacobian to ~150 N at the TCP —
+        # 6× the cable equilibrium force.  At a 17 cm position error, joint
+        # spring force alone delivers ~47 N at the TCP.
+        #
+        # IK strategy: DLS Jacobian iteration starting from the arm's
+        # current joint configuration (always available via Observation).
+        # See `ur5e_kinematics.py` for derivation.
+        #
+        # T2 SFP WP2 only on first cut.  If the joint move fails (IK
+        # divergence, joint-limit violation, post-move pose error too large),
+        # we fall back to the existing Cartesian retry path so worst case is
+        # the v22 behaviour.
+        self.enable_joint_space_lateral = True
+        self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
+        self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
+        self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
+        self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
+        self.joint_space_stage_timeout_sec = 20.0   # bounded so we don't burn budget
+        self.joint_space_park_settle_sec = 0.6      # post-move Cartesian re-engage hold
+        # Cached fixed transform (tool0 → gripper/tcp).  Populated lazily
+        # from TF on first joint-space move (TF buffer may be empty at
+        # __init__ time).  None = not yet looked up.
+        self._tool0_to_tcp_matrix = None
+
         # ---- Bug 108: structured diagnostics for post-hoc analysis ---------
         # Every key decision point emits a one-line `ANT-DIAG event=…`
         # record via the standard logger AND, best-effort, appends a JSON
@@ -771,6 +810,266 @@ class ANT(Policy):
             )
             return fx, fy, orient
         return tgt_x, tgt_y, orient
+
+    # ----------------------------------------------------------------------
+    # Bug 123 (v23): joint-space lateral move via UR5e IK
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _rot_to_quat(R: np.ndarray):
+        """3x3 rotation matrix → (qx, qy, qz, qw) quaternion.
+
+        Uses the Shepperd algorithm (numerically stable for all R).
+        """
+        tr = R[0, 0] + R[1, 1] + R[2, 2]
+        if tr > 0.0:
+            s = 0.5 / math.sqrt(tr + 1.0)
+            qw = 0.25 / s
+            qx = (R[2, 1] - R[1, 2]) * s
+            qy = (R[0, 2] - R[2, 0]) * s
+            qz = (R[1, 0] - R[0, 1]) * s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            qw = (R[2, 1] - R[1, 2]) / s
+            qx = 0.25 * s
+            qy = (R[0, 1] + R[1, 0]) / s
+            qz = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            qw = (R[0, 2] - R[2, 0]) / s
+            qx = (R[0, 1] + R[1, 0]) / s
+            qy = 0.25 * s
+            qz = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            qw = (R[1, 0] - R[0, 1]) / s
+            qx = (R[0, 2] + R[2, 0]) / s
+            qy = (R[1, 2] + R[2, 1]) / s
+            qz = 0.25 * s
+        return qx, qy, qz, qw
+
+    def _pose_to_matrix(self, pose: Pose) -> np.ndarray:
+        """geometry_msgs/Pose → 4x4 homogeneous transform."""
+        T = np.eye(4)
+        T[:3, :3] = self._quat_to_rot(
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w,
+        )
+        T[0, 3] = pose.position.x
+        T[1, 3] = pose.position.y
+        T[2, 3] = pose.position.z
+        return T
+
+    def _ensure_tool0_to_tcp_cached(self) -> bool:
+        """Look up and cache the fixed transform tool0 → gripper/tcp.
+
+        Returns True if the transform is available (now or already cached).
+        Both frames are URDF-published — allowed per CLAUDE.md TF policy.
+        """
+        if self._tool0_to_tcp_matrix is not None:
+            return True
+        try:
+            tf_stamped = self._parent_node._tf_buffer.lookup_transform(
+                "tool0", "gripper/tcp", Time(),
+            )
+        except TransformException as ex:
+            self.get_logger().warning(
+                f"Joint-space lateral: tool0→gripper/tcp TF lookup failed ({ex})"
+            )
+            return False
+        t = tf_stamped.transform.translation
+        r = tf_stamped.transform.rotation
+        T = np.eye(4)
+        T[:3, :3] = self._quat_to_rot(r.x, r.y, r.z, r.w)
+        T[0, 3] = t.x
+        T[1, 3] = t.y
+        T[2, 3] = t.z
+        self._tool0_to_tcp_matrix = T
+        self.get_logger().info(
+            f"Joint-space lateral: cached tool0→gripper/tcp = "
+            f"({t.x:+.4f}, {t.y:+.4f}, {t.z:+.4f}) m"
+        )
+        return True
+
+    def _solve_ik_for_tcp(self, target_tcp_pose: Pose, q_current: np.ndarray):
+        """Convert a target gripper/tcp pose to joint angles via UR5e IK.
+
+        Returns the 6-vector joint config or None on failure.  Failures:
+          - tool0→tcp TF unavailable
+          - DLS IK didn't converge
+          - Solution requires more than `joint_space_max_total_delta_rad`
+            of joint travel from current (sanity guard against bad branches)
+        """
+        if not self._ensure_tool0_to_tcp_cached():
+            return None
+        T_base_to_tcp = self._pose_to_matrix(target_tcp_pose)
+        T_base_to_tool0 = T_base_to_tcp @ np.linalg.inv(self._tool0_to_tcp_matrix)
+        q_sol = ur5e_kinematics.solve_ik_dls(
+            T_base_to_tool0, q_current,
+            max_step_rad=self.joint_space_max_step_rad,
+        )
+        if q_sol is None:
+            return None
+        delta = float(np.linalg.norm(q_sol - q_current))
+        if delta > self.joint_space_max_total_delta_rad:
+            self.get_logger().warning(
+                f"Joint-space lateral: IK proposes {delta:.2f} rad "
+                f"(>{self.joint_space_max_total_delta_rad:.2f}) — rejecting "
+                "to avoid unsafe joint reconfiguration"
+            )
+            return None
+        return q_sol
+
+    def _lateral_move_joint_space(
+        self, target_xy, lateral_z, orient,
+        move_robot, get_observation, start_time, time_limit_sec,
+        zone: str, label: str,
+    ):
+        """Joint-space lateral move that bypasses the 15 N Cartesian ceiling.
+
+        Bug 123 (v23): Used as the primary path for T2 SFP WP2 to close the
+        17 cm worst-case stall observed on v18/v22.  Falls back to None on
+        any failure — caller MUST then run the Cartesian path so worst case
+        is the v22 behaviour.
+
+        Returns:
+            (actual_x, actual_y, orient, ok)  where ok is True if the move
+            converged within `joint_space_arrival_tol_m` of target.  Even
+            when ok=False the helper guarantees the controller is back in
+            Cartesian mode at the arm's current TCP pose, so the caller can
+            continue without a forced mode-switch impulse.
+        """
+        if not (self.enable_joint_space_lateral and
+                self.enable_lateral_arrival_check):
+            return None
+        tgt_x, tgt_y = target_xy
+        obs = get_observation()
+        if obs is None or obs.joint_states is None:
+            return None
+        q_current = ur5e_kinematics.joint_state_to_ordered_array(
+            obs.joint_states
+        )
+        if q_current is None:
+            self.get_logger().warning(
+                f"{label}: joint_states missing UR5e joint names — "
+                "falling back to Cartesian"
+            )
+            return None
+        target_pose = self._make_pose(tgt_x, tgt_y, lateral_z, orient)
+        q_target = self._solve_ik_for_tcp(target_pose, q_current)
+        if q_target is None:
+            self.get_logger().warning(
+                f"{label}: IK failed for target ({tgt_x:.4f},{tgt_y:.4f}) — "
+                "falling back to Cartesian"
+            )
+            self._diag_event(
+                "joint_space_ik_failed",
+                zone=zone, label=label, tgt_x=tgt_x, tgt_y=tgt_y,
+            )
+            return None
+        delta = q_target - q_current
+        self.get_logger().info(
+            f"{label}: joint-space lateral target=({tgt_x:.4f},{tgt_y:.4f}) "
+            f"delta_q (deg)=[{', '.join(f'{d*180.0/math.pi:+.2f}' for d in delta)}]"
+        )
+        self._diag_event(
+            "joint_space_start",
+            zone=zone, label=label, tgt_x=tgt_x, tgt_y=tgt_y,
+            delta_q_norm=float(np.linalg.norm(delta)),
+        )
+        # Send the JointMotionUpdate; loop monitors convergence + stall.
+        jmu = self._build_joint_motion_update(q_target.tolist())
+        stage_start = self.time_now()
+        stage_timeout = Duration(seconds=self.joint_space_stage_timeout_sec)
+        stall_window = 5
+        stall_tol_m = 0.002
+        error_history: collections.deque = collections.deque(maxlen=stall_window)
+        ok = False
+        actual_x, actual_y = tgt_x, tgt_y
+        iteration = 0
+        while True:
+            if self._is_timed_out(start_time, time_limit_sec):
+                break
+            if (self.time_now() - stage_start) >= stage_timeout:
+                self.get_logger().warning(
+                    f"{label}: joint-space stage timeout"
+                )
+                break
+            try:
+                move_robot(joint_motion_update=jmu)
+            except Exception as ex:
+                self.get_logger().warning(
+                    f"{label}: joint move_robot rejected ({ex}) — "
+                    "falling back to Cartesian"
+                )
+                return None
+            self.sleep_for(0.05)
+            obs_a = get_observation()
+            if obs_a is None:
+                continue
+            iteration += 1
+            actual_x = obs_a.controller_state.tcp_pose.position.x
+            actual_y = obs_a.controller_state.tcp_pose.position.y
+            err = float(np.hypot(tgt_x - actual_x, tgt_y - actual_y))
+            error_history.append(err)
+            stalled = (
+                iteration >= 5
+                and len(error_history) == stall_window
+                and (max(error_history) - min(error_history)) < stall_tol_m
+            )
+            self.get_logger().info(
+                f"{label}: joint iter={iteration} xy_err={err*1000:.1f} mm"
+                + (" [STALLED]" if stalled else "")
+            )
+            if err <= self.joint_space_arrival_tol_m:
+                ok = True
+                break
+            if stalled:
+                # Joint impedance stalled — even joint torques can't close
+                # the gap (probably joint-limit or singularity neighborhood).
+                # Accept what we got.
+                break
+        # Re-engage Cartesian mode at the arm's current TCP pose to avoid a
+        # large position-error spring impulse on the next Cartesian move.
+        obs_park = get_observation()
+        if obs_park is not None:
+            park_pose = obs_park.controller_state.tcp_pose
+            # Update orient from current — joint moves can rotate slightly.
+            park_orient = park_pose.orientation
+            try:
+                park_motion = self._build_motion_update(
+                    park_pose, self.approach_stiffness,
+                    feedforward_fy=0.0, feedforward_fz=0.0,
+                )
+                move_robot(motion_update=park_motion)
+            except Exception as ex:
+                self.get_logger().warning(
+                    f"{label}: Cartesian re-engage publish failed ({ex})"
+                )
+            self.sleep_for(self.joint_space_park_settle_sec)
+            # Read final pose post-park
+            obs_final = get_observation()
+            if obs_final is not None:
+                actual_x = obs_final.controller_state.tcp_pose.position.x
+                actual_y = obs_final.controller_state.tcp_pose.position.y
+                orient = obs_final.controller_state.tcp_pose.orientation
+            else:
+                orient = park_orient
+        err_final = float(np.hypot(tgt_x - actual_x, tgt_y - actual_y))
+        self._diag_event(
+            "joint_space_final",
+            zone=zone, label=label,
+            tgt_x=tgt_x, tgt_y=tgt_y,
+            actual_x=actual_x, actual_y=actual_y,
+            err_mm=err_final * 1000.0,
+            within_tol=err_final <= self.joint_space_arrival_tol_m,
+            ok=ok,
+        )
+        self.get_logger().info(
+            f"{label}: joint-space final err={err_final*1000:.1f} mm "
+            f"(ok={ok})"
+        )
+        return actual_x, actual_y, orient, ok
 
     @property
     def _force_abort_threshold(self) -> float:
@@ -1439,6 +1738,58 @@ class ANT(Policy):
                     )
                     obs_wp = get_observation()
                     orient = obs_wp.controller_state.tcp_pose.orientation if obs_wp else orient
+                # Bug 123 (v23): joint-space lateral via UR5e IK.  This is the
+                # primary path because the Cartesian impedance controller's
+                # 15 N maximum_wrench cap (verified at
+                # cartesian_impedance_action.cpp:82-83) is the architectural
+                # cause of the v18/v22 17 cm T2 stall on high-tension days.
+                # Joint torques (~150 Nm at the shoulder ⇒ ~150 N at the TCP
+                # via Jacobian) are well above the ~25 N cable equilibrium.
+                # On any failure (IK divergence, bad branch, joint-limit risk,
+                # or post-move pose error too large) we fall through to the
+                # legacy Cartesian path so worst case is the v22 behaviour.
+                joint_space_ok = False
+                if self.joint_space_t2_sfp:
+                    js_target_xy = (tgt_x, tgt_y)
+                    js_result = self._lateral_move_joint_space(
+                        target_xy=js_target_xy,
+                        lateral_z=safe_z,
+                        orient=orient,
+                        move_robot=move_robot,
+                        get_observation=get_observation,
+                        start_time=start_time,
+                        time_limit_sec=time_limit_sec,
+                        zone="sfp",
+                        label="Stage 1 SFP T2 WP2",
+                    )
+                    if js_result is not None:
+                        actual_x, actual_y, orient, joint_space_ok = js_result
+                if joint_space_ok:
+                    self.get_logger().info(
+                        f"Stage 1 SFP T2: joint-space lateral converged "
+                        f"(actual=({actual_x:.4f},{actual_y:.4f})); "
+                        "skipping Cartesian WP2 split + arrival retry"
+                    )
+                    # Skip the Cartesian sub-step loop and arrival check.
+                    # WP3 below will descend to transit_z from current pose.
+                    self._move_to_pose_and_wait(
+                        self._make_pose(tgt_x, tgt_y, transit_z, orient),
+                        move_robot, get_observation, start_time, time_limit_sec,
+                        convergence_m=0.05, stage_timeout_sec=20.0,
+                        label="Stage 1 SFP T2 WP3 descend to transit_z",
+                        check_force=False,
+                    )
+                    obs_post = self._wait_for_observation(
+                        get_observation, start_time, time_limit_sec
+                    )
+                    orient_final = obs_post.controller_state.tcp_pose.orientation
+                    self._diag_event(
+                        "trial_stage1_complete",
+                        zone="sfp", trial=trial, path="joint_space",
+                    )
+                    return self._make_pose(tgt_x, tgt_y, connector_z, orient_final)
+
+                # Cartesian fallback path (v22 behaviour).
                 # Bug 89 → Bug 92 → Bug 96 (Option A) upgrade: 3-way split adapts
                 # to N-way + Y feedforward on high-tension days.  Bug 92 (3-way,
                 # 1.75 cm/step) recovered T2 in sim/typical-tension HW but still
