@@ -32,6 +32,28 @@ SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
     cd /ws_aic/src/aic && pixi install --locked
 
+# Bug 90 (pixi-cache variant): `pixi install` uses a BuildKit cache mount for
+# its build directory.  BuildKit cache mounts are NOT invalidated when a
+# preceding COPY layer changes — even with `docker build --no-cache`.  So pixi
+# can silently install a stale ant_policy_node (old ANT.py, missing new modules)
+# from its cache, regardless of what was just COPY'd into the image.
+#
+# Fix: this cache-mount-free RUN step runs AFTER pixi install and IS invalidated
+# by the COPY ant_policy_node layer above.  It overwrites every .py file in the
+# pixi env's ant_policy_node package with the freshly COPY'd source files,
+# guaranteeing the deployed image always contains exactly what is in the source
+# tree at build time.  The pixi env path is fixed by the lock file; if it ever
+# changes, the cp will fail loudly during the build.
+RUN PIXI_PKG=/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node && \
+    SRC=/ws_aic/src/aic/ant_policy_node/ant_policy_node && \
+    if [[ ! -d "$PIXI_PKG" ]]; then \
+      echo "ERROR: pixi env package dir $PIXI_PKG not found — pixi install may have failed or env path changed"; \
+      exit 1; \
+    fi && \
+    cp -f "$SRC"/*.py "$PIXI_PKG/" && \
+    echo "Synced ant_policy_node source into pixi env:" && \
+    ls "$PIXI_PKG"/*.py
+
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
 #!/bin/bash

@@ -34,16 +34,28 @@ Same for `__init__.py` and `stage1_debug.py` if they change. Verify with
 and have the Dockerfile do a fresh colcon build, but that's deferred.
 
 **Automated safeguard (May 2026)**: `submit.sh` now includes two protective steps:
-1. **Pre-build sync** — Before docker build, automatically syncs `ant_policy_node/ANT.py`
-   and friends to `install/` and verifies with `diff -q`.
-2. **Post-build verification** — After docker build, extracts `ANT.py` from the image
-   and greps for a known recent constant (e.g., Bug 122's `-1.7133` yaw correction).
-   If missing, emits a warning that the image contains stale code before ECR push.
+1. **Pre-build sync** — Before docker build, automatically syncs `ant_policy_node/ANT.py`,
+   `__init__.py`, `stage1_debug.py`, and `ur5e_kinematics.py` to `install/` and verifies
+   with `diff -q`.  Aborts if a source file exists but its install/ counterpart does not.
+2. **Post-build verification** — After docker build, runs `docker run --entrypoint /bin/bash`
+   to `find` all copies of `ANT.py` and `ur5e_kinematics.py` in the image and greps each
+   for a `MARKERS` list of known-recent constants.  Any missing marker aborts the push.
 
 This prevents the silent failure mode where commits are pushed, build appears
 successful, but the deployed image contains old code (observed in v20/v21
 competition submissions). Always run `./submit.sh <tag>` directly — never
 `docker compose build` manually.
+
+**Pixi-cache variant of Bug 90 (discovered v24 build, 2026-05-06)**:
+`pixi install --locked` uses a BuildKit cache mount (`--mount=type=cache,target=.pixi/build`).
+BuildKit cache mounts are **not** invalidated when a preceding `COPY` layer changes — even
+with `docker build --no-cache`.  Pixi can therefore silently install a stale `ant_policy_node`
+from its build cache (e.g., ANT.py without Bug 122's `-1.7133` yaw correction) regardless of
+what was just COPY'd.  **Fix**: a cache-mount-free `RUN cp -f` step in the Dockerfile runs
+after `pixi install` and overwrites the pixi env's `.py` files with the freshly COPY'd source.
+This step IS invalidated by the COPY layer and guarantees the deployed image reflects the
+source tree.  The verification's `find`-based marker check (rather than a hardcoded path)
+is what surfaced this bug during the v24 build.
 
 ## Score progression key milestones
 
