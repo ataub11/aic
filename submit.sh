@@ -13,15 +13,21 @@
 #   - AWS profile 'ant_aic' configured (aws configure --profile ant_aic)
 #   - Docker running
 #
-# Bug 90 Safeguard (stale install/ directory):
+# Bug 90 / Bug 123 Safeguard (stale or missing install/ files):
 #   This script includes two protective steps:
-#   1. Pre-build: Syncs ant_policy_node/install/ from source to ensure the
-#      Dockerfile copies fresh code (not stale committed copies).
-#   2. Post-build: Runtime verification extracts ANT.py from the image and
-#      checks for a known recent constant to confirm source code (not stale
-#      install/ copy) is in the final image.
+#   1. Pre-build: Syncs ant_policy_node/install/ from source for ANT.py,
+#      __init__.py, stage1_debug.py, and ur5e_kinematics.py to ensure the
+#      Dockerfile copies fresh code (not stale committed copies).  If a
+#      source file exists but its install/ counterpart does not, the script
+#      aborts (a new package member must have its install/ copy committed).
+#   2. Post-build: Runtime verification extracts ANT.py and ur5e_kinematics.py
+#      from the image and asserts that all expected code markers are present
+#      (yaw correction constant from Bug 122, joint-space IK call sites and
+#      module definitions from Bug 123).  Missing markers ABORT the push —
+#      the image is unshippable.
 #   Without these steps, Python's import resolution can pick the old install/
-#   copy at runtime, shipping an old policy despite new commits being pushed.
+#   copy at runtime, shipping old or incomplete code despite new commits being
+#   pushed (observed: v23 shipped without verifiable IK code presence).
 
 set -euo pipefail
 
@@ -85,8 +91,12 @@ if [[ -f "$INSTALL_ANT_PY" ]]; then
     exit 1
   fi
 fi
-# Also sync __init__.py and stage1_debug.py if they exist and have been modified
-for file in __init__.py stage1_debug.py; do
+# Also sync __init__.py, stage1_debug.py, and ur5e_kinematics.py if they exist
+# and have been modified.  ur5e_kinematics.py was added in Bug 123 (v23) — it
+# is a NEW package member that the install/ tree must mirror so that
+# `from ant_policy_node import ur5e_kinematics` resolves at runtime regardless
+# of which copy Python imports.
+for file in __init__.py stage1_debug.py ur5e_kinematics.py; do
   SRC="ant_policy_node/ant_policy_node/${file}"
   DEST="ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/${file}"
   if [[ -f "$SRC" && -f "$DEST" ]]; then
@@ -94,6 +104,11 @@ for file in __init__.py stage1_debug.py; do
     if diff -q "$SRC" "$DEST" >/dev/null 2>&1; then
       echo "✓ install/${file} synced"
     fi
+  elif [[ -f "$SRC" && ! -f "$DEST" ]]; then
+    echo "✗ FATAL: ${SRC} exists but ${DEST} is missing."
+    echo "  ${file} would not be importable from the install/ tree at runtime."
+    echo "  Add the install/ copy or remove the source file before submitting."
+    exit 1
   fi
 done
 
@@ -118,39 +133,70 @@ if [[ "$BAKED_VERSION" != "$BUILD_VERSION" ]]; then
   exit 1
 fi
 
-# Runtime verification: extract ANT.py from the image and check a known constant
-# to ensure the source code (not stale install/ copy) is in the image.
-# This is the final safeguard against the Bug 90 gotcha.
+# Runtime verification: extract policy files from the image and check known
+# markers to ensure the source code (not stale install/ copy) and all expected
+# package members are in the image.  This is the final safeguard against the
+# Bug 90 gotcha and the Bug 123 "new file may not have shipped" gotcha.
+# Failures here ABORT the push — an image that fails verification is unshippable.
 echo ""
-echo "=== Step 1b: Runtime verification (Bug 90 stale install/ check) ==="
+echo "=== Step 1b: Runtime verification (image content check) ==="
 TEMP_EXTRACT="/tmp/ant_policy_check_$$"
 mkdir -p "$TEMP_EXTRACT"
-# Extract ANT.py from the image's layers using docker create + cp
-CONTAINER_ID=$(docker create "${LOCAL_TAGGED}" 2>/dev/null) || {
-  echo "Warning: could not create container to verify ANT.py; skipping runtime check"
-  CONTAINER_ID=""
-}
-if [[ -n "$CONTAINER_ID" ]]; then
-  docker cp "${CONTAINER_ID}:/ws_aic/install/aic_model/lib/python3.12/site-packages/ant_policy_node/ANT.py" \
-    "$TEMP_EXTRACT/ANT.py" 2>/dev/null || true
-  docker rm "$CONTAINER_ID" >/dev/null 2>&1
+trap 'rm -rf "$TEMP_EXTRACT"' EXIT
 
-  # Check for a recent bug constant that should be in the image.
-  # Bug 122 added/modified gripper_yaw_correction_rad; check for -1.7133 value.
-  # If this is missing, the image has stale code.
-  if [[ -f "$TEMP_EXTRACT/ANT.py" ]]; then
-    if grep -q "1\.7133\|yaw_correction_rad\[.*sc.*3.*\].*-1\.7133" "$TEMP_EXTRACT/ANT.py" 2>/dev/null; then
-      echo "✓ Runtime check passed: Image contains expected code (Bug 122 yaw_correction)"
-    else
-      echo "⚠ Runtime check WARNING: Image may contain stale code (expected -1.7133 yaw correction not found)"
-      echo "  This could indicate the install/ directory was out of sync during build."
-      echo "  The image will still be built, but monitor logs for unexpected behavior."
-    fi
+CONTAINER_ID=$(docker create "${LOCAL_TAGGED}" 2>/dev/null) || {
+  echo "✗ FATAL: could not create container from ${LOCAL_TAGGED} for verification."
+  exit 1
+}
+
+IMAGE_PKG_DIR="/ws_aic/install/aic_model/lib/python3.12/site-packages/ant_policy_node"
+
+# Extract every file we will verify.  Missing files are a hard failure — we
+# do not push images with unknown content.
+docker cp "${CONTAINER_ID}:${IMAGE_PKG_DIR}/ANT.py" "$TEMP_EXTRACT/ANT.py" 2>/dev/null \
+  || { echo "✗ FATAL: ${IMAGE_PKG_DIR}/ANT.py not present in image."; docker rm "$CONTAINER_ID" >/dev/null 2>&1; exit 1; }
+docker cp "${CONTAINER_ID}:${IMAGE_PKG_DIR}/ur5e_kinematics.py" "$TEMP_EXTRACT/ur5e_kinematics.py" 2>/dev/null \
+  || { echo "✗ FATAL: ${IMAGE_PKG_DIR}/ur5e_kinematics.py not present in image (Bug 123 module missing — joint-space IK would fail to import at runtime)."; docker rm "$CONTAINER_ID" >/dev/null 2>&1; exit 1; }
+docker rm "$CONTAINER_ID" >/dev/null 2>&1
+
+# Each marker is `description|file|grep-extended-regex`.  All markers must
+# match; any miss aborts the push.  Add a new line per bug whose presence in
+# the deployed image must be confirmed.
+MARKERS=(
+  "Bug 122 yaw correction (-1.7133)|ANT.py|-1\.7133"
+  "Bug 123 IK call site (solve_ik_dls)|ANT.py|solve_ik_dls"
+  "Bug 123 joint-space helper (_lateral_move_joint_space)|ANT.py|def _lateral_move_joint_space"
+  "Bug 123 joint-space master toggle (enable_joint_space_lateral)|ANT.py|enable_joint_space_lateral"
+  "Bug 123 IK module (solve_ik_dls definition)|ur5e_kinematics.py|def solve_ik_dls"
+  "Bug 123 IK module (geometric_jacobian)|ur5e_kinematics.py|def geometric_jacobian"
+  "Bug 123 IK module (joint_state_to_ordered_array)|ur5e_kinematics.py|def joint_state_to_ordered_array"
+)
+
+VERIFY_FAILED=0
+for marker in "${MARKERS[@]}"; do
+  IFS='|' read -r desc file pattern <<<"$marker"
+  if grep -Eq "$pattern" "$TEMP_EXTRACT/$file" 2>/dev/null; then
+    echo "✓ ${desc}"
+  else
+    echo "✗ MISSING: ${desc} (expected pattern '${pattern}' in ${file})"
+    VERIFY_FAILED=1
   fi
-  rm -rf "$TEMP_EXTRACT"
-else
-  echo "⚠ Skipping runtime verification (could not extract ANT.py from image)"
+done
+
+if [[ "$VERIFY_FAILED" -ne 0 ]]; then
+  echo ""
+  echo "✗ FATAL: image content verification failed."
+  echo "  The image at ${LOCAL_TAGGED} is missing expected code markers."
+  echo "  Likely causes: (a) install/ tree out of sync with source (Bug 90 saga),"
+  echo "  (b) docker layer cache served a stale COPY layer, or (c) a new package"
+  echo "  member was not added to the install/ tree."
+  echo "  Aborting push — DO NOT submit this image."
+  exit 1
 fi
+echo "✓ All image content markers verified — safe to push."
+
+trap - EXIT
+rm -rf "$TEMP_EXTRACT"
 
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
 if [[ "$SKIP_VERIFY" == "false" ]]; then

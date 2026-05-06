@@ -388,10 +388,16 @@ T2 SFP WP2 wiring (ANT.py):
   offsets in `default_kinematics.yaml`. For a 6 cm move converging to
   2 cm tolerance this is well below noise, but for high-precision Stage
   3/4 work it would matter (we don't use joint-space there).
-- **Bug 90 install/ saga applies**: `submit.sh` syncs `ANT.py` and
-  `__init__.py` automatically; `ur5e_kinematics.py` is a NEW file — verify
-  it lands in the docker image before submission. The post-build grep
-  check should be augmented for v23 to grep for `solve_ik_dls`.
+- **Bug 90 install/ saga applies**: `submit.sh` now syncs `ANT.py`,
+  `__init__.py`, `stage1_debug.py`, AND `ur5e_kinematics.py` automatically,
+  and aborts pre-build if any source file lacks an install/ counterpart.
+  The post-build verification extracts both `ANT.py` and `ur5e_kinematics.py`
+  from the built image and greps for a fixed list of bug markers (Bug 122
+  `-1.7133` yaw correction, Bug 123 `solve_ik_dls`, `_lateral_move_joint_space`,
+  `enable_joint_space_lateral`, plus three IK module function definitions).
+  Any missing marker aborts the push. Add a marker line to the `MARKERS`
+  array in `submit.sh` whenever a new bug's presence in the deployed image
+  must be confirmed.
 - **First switch to JOINT mode wipes the controller's pose target**:
   the re-engagement step publishes a Cartesian pose at the current TCP,
   but if the controller has stale target_stiffness from before the joint
