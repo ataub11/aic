@@ -224,6 +224,25 @@ if [[ "$VERIFY_EXIT" -ne 0 ]]; then
 fi
 echo "✓ All image content markers verified — safe to push."
 
+# Save verification evidence alongside sim_runs so every submission has a
+# permanent local record of exactly what was in the image at push time.
+# This means "what shipped" can be answered from the repo without pulling
+# the ECR image or asking the organizers for logs.
+EVIDENCE_DIR="ant_policy_node/sim_runs/submit_evidence_${TAG}"
+mkdir -p "$EVIDENCE_DIR"
+{
+  echo "tag=${TAG}"
+  echo "build_version=${BUILD_VERSION}"
+  echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "---"
+  echo "$VERIFY_OUTPUT"
+} > "${EVIDENCE_DIR}/verify_output.txt"
+# Also snapshot the file-level hashes of every .py that went into the image.
+docker run --rm --entrypoint /bin/bash "${LOCAL_TAGGED}" -c \
+  'find /ws_aic -name "*.py" -path "*/ant_policy_node/*" | sort | xargs md5sum 2>/dev/null' \
+  > "${EVIDENCE_DIR}/py_hashes.txt" 2>/dev/null || true
+echo "Evidence saved to ${EVIDENCE_DIR}/"
+
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
 if [[ "$SKIP_VERIFY" == "false" ]]; then
   echo ""
