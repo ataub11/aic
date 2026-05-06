@@ -156,10 +156,13 @@ FAIL=0
 
 # ── Marker definitions (add new bugs here) ────────────────────────────────────
 ANT_MARKERS=(
-  "-1.7133"                       # Bug 122 yaw correction
-  "solve_ik_dls"                  # Bug 123 IK call site in ANT.py
-  "def _lateral_move_joint_space" # Bug 123 joint-space helper
-  "enable_joint_space_lateral"    # Bug 123 master toggle
+  "-1.7133"                                # Bug 122 yaw correction
+  "solve_ik_dls"                           # Bug 123 IK call site in ANT.py
+  "def _lateral_move_joint_space"          # Bug 123 joint-space helper
+  "enable_joint_space_lateral"             # Bug 123 master toggle
+  "class JointSpaceDiagnosticAbort"        # Bug 124 A/B/C discriminator class
+  "enable_joint_space_diag_signatures"     # Bug 124 master toggle
+  "BUG124 diag signature"                  # Bug 124 runtime log line
 )
 IK_MARKERS=(
   "def solve_ik_dls"

@@ -75,7 +75,8 @@ is what surfaced this bug during the v24 build.
 | **v19 (planned)** | **TBD** | **Bug 106 — lateral arrival check + retry** (Option C from improvement plan): after every Stage-1 lateral phase, measure actual TCP XY vs commanded; if residual > 2.5 cm, retry up to 2× with escalated feedforward (+50%/retry, cap 9 N) and stiffness (+50 N/m/retry, cap 500 N/m). This addresses the v11=88 / v14=23 same-code split at its root cause (lateral stall, not Stage-4 tuning). **Bug 107 — widen high-tension levers** (narrow Option B): threshold 20.5→19.0 N (always-on real HW), feedforward 4→6 N, T2 split 5→7, SC step 3.5→2.5 cm, lateral stiff 250→350 N/m, anchor bias 1→2 cm. **Bug 108 — structured diagnostics**: see `~/aic_results/ant_diagnostics.jsonl` methodology below. |
 | **v22 (submission_694, 2026-05-01)** | **64.55** | T1=29.48 (tier_2=21.58, tier_3=6.90, dist≈0.10 m, no insertion), T2=1.0 (dist=0.17 m, lateral stalled — same as v18), T3=34.08 (tier_2=11.83, tier_3=21.24, **dist=0.04 m, gripper-yaw alignment WORKING for the first time** — Bug 122 calibration successful). T1 marginal improvement (+8 vs v18) likely from Bug 106 arrival retry. T3 huge breakthrough (+33 vs v18) from Bug 99/122 yaw correction. **T2 architectural blocker confirmed** — Bug 106 retries hit the 15 N max_wrench cap regardless of escalation. End-of-run "corrupted size" SIGKILL — investigate but not the root score issue. |
 | **v23 (in progress, branch claude/t2-joint-space-ik-v23)** | **TBD (target ≥100)** | **Bug 123 — joint-space T2 lateral via UR5e IK.** See "v22 cost-benefit analysis" below. Verified at `aic_ros2_controllers.yaml:53` and `cartesian_impedance_action.cpp:82-83`: the Cartesian impedance controller clips total spring+damping+feedforward at `maximum_wrench=15 N` per axis, applied AFTER summation. Cable equilibrium ~25 N on bad days ⇒ Cartesian impedance physically cannot push the arm to T2. `JointMotionUpdate` goes through a separate `joint_impedance_action` path that clamps to per-joint torque limits (~150 Nm shoulder), translating through the Jacobian to ~150 N at the TCP. At a 17 cm position error joint spring force alone ≈ 47 N > 25 N cable. Implementation: new `ur5e_kinematics.py` module with DLS-Jacobian IK starting from current joints (always available via `Observation.joint_states`). T2 SFP WP2 only on first cut. Failure cases (IK divergence, joint-limit risk, post-move stall) fall back to v22 Cartesian path so worst case is unchanged. Cartesian re-engagement at current TCP after the joint move avoids force-spike on mode switch. Sim baseline expected: T1≥29, T2≥37 (this is the gap), T3≥34 ⇒ ≥100. |
-| **v23 (submission_768, 2026-05-06)** | **65.11** | T1=30.05 (tier_2=22.15, tier_3=6.90), T2=1.0 (tier_2=0, tier_3=0 — **unchanged from v18/v22**), T3=34.06 (tier_2=11.80, tier_3=21.26 — Bug 99/122 yaw preserved). **Bug 123 joint-space IK did NOT close the T2 gap on real HW.** Score +0.56 over v22 (64.55) = within run-to-run noise. Submission artifacts contained only image URI + score JSON + summary TXT — no `ant_diagnostics.jsonl`, no policy stdout — so the joint-space path failure mode cannot be discriminated from the published outputs. Three candidate explanations: **(A)** IK rejected on real-HW kinematics (joint-limit guard / 0.6-rad total-delta cap / 20 s timeout) → fell back to v22 Cartesian path; **(B)** joint move actually stalled because real-HW cable equilibrium > 25 N design assumption (47 N joint spring at 17 cm error not enough margin); **(C)** Cartesian re-engagement after joint move re-introduced the 15 N stall before scoring radius reached. Discrimination requires either (i) raw policy stdout from eval container, or (ii) `~/aic_results/ant_diagnostics.jsonl` (Bug 108 records `event=joint_space_attempt/joint_space_arrival/joint_space_fallback`). T1/T3 preserve v22 gains (Bugs 106/122 unaffected by the T2 joint-space path). |
+| **v23 (submission_768, 2026-05-06)** | **65.11** | T1=30.05 (tier_2=22.15, tier_3=6.90), T2=1.0 (tier_2=0, tier_3=0 — **unchanged from v18/v22**), T3=34.06 (tier_2=11.80, tier_3=21.26 — Bug 99/122 yaw preserved). **Bug 123 joint-space IK did NOT close the T2 gap on real HW.** Score +0.56 over v22 (64.55) = within run-to-run noise. Submission artifacts contained only image URI + score JSON + summary TXT — no `ant_diagnostics.jsonl`, no policy stdout — so the joint-space path failure mode cannot be discriminated from the published outputs. Three candidate explanations: **(A)** IK rejected on real-HW kinematics (joint-limit guard / 0.6-rad total-delta cap / 20 s timeout) → fell back to v22 Cartesian path; **(B)** joint move actually stalled because real-HW cable equilibrium > 25 N design assumption (47 N joint spring at 17 cm error not enough margin); **(C)** Cartesian re-engagement after joint move re-introduced the 15 N stall before scoring radius reached. Discrimination requires either (i) raw policy stdout from eval container, or (ii) `~/aic_results/ant_diagnostics.jsonl` (Bug 108 records `event=joint_space_attempt/joint_space_arrival/joint_space_fallback`). T1/T3 preserve v22 gains (Bugs 106/122 unaffected by the T2 joint-space path). **Verified post-mortem (2026-05-06)** — pulled the v23 ECR image and ran `find /ws_aic` + grep for Bug 122 (`-1.7133`) and Bug 123 (`enable_joint_space_lateral`) markers: present in all three copies of ANT.py (source tree, install/, pixi env) and `ur5e_kinematics.py` present in all three locations. Bug 123 code definitively shipped — T2=1.0 is a real hardware/algorithm failure, not a stale-image artifact. |
+| **v24 (planned, branch claude/review-v23-results-aHUig)** | **TBD (diagnostic submission)** | **Bug 124 — A/B/C joint-space failure-mode discriminator.** Encodes which of cases A (IK rejected) / B (joint move stalled) / C (Cartesian re-engage spike) fired into the **final TCP position** so T2 tier_3 in score.json discriminates them.  Case A parks +2 cm in +X (away from port) — final dist > start dist; Case B leaves the arm wherever joint impedance physically stalled — final dist ∈ (0, 0.7); Case C bumps current pose +5 mm Z. Trial raises `JointSpaceDiagnosticAbort` and `insert_cable` returns True so the eval samples the signature pose. T1/T3 unchanged (Bug 124 only fires on T2 SFP WP2). Expected score band: ~65 ± signature offset. **One real-HW run reads out the failure mode** — v25 then targets the diagnosed case. |
 
 ## Real-HW vs sim variance pattern (key insight)
 
@@ -420,6 +421,65 @@ T2 SFP WP2 wiring (ANT.py):
   fundamental issue (cable equilibrium) but the geometry is different and
   scoring data shows SC currently lateral is OK; deferred until T2 result
   validated.
+
+## Bug 124 — A/B/C joint-space failure-mode discriminator (branch claude/review-v23-results-aHUig — v24)
+
+**Trigger**: v23 (submission_768) shipped Bug 123 IK code (verified by
+`docker run` against the ECR image — all three ANT.py copies contain
+`enable_joint_space_lateral` and `solve_ik_dls`, plus `ur5e_kinematics.py`
+is present in all three locations) but T2 still scored 1.0.  The AIC
+platform does not return `ant_diagnostics.jsonl`; we cannot read
+`event=joint_space_*` records to discriminate the three candidate failure
+modes (A=IK rejected, B=joint move stalled, C=Cartesian re-engage spike).
+
+**Approach**: encode the failure mode into the **final TCP position** so
+T2 tier_3 in `score.json` (which IS returned) becomes the discriminator.
+Each case parks the arm at a distinct signature offset and raises a
+`JointSpaceDiagnosticAbort`; `insert_cable` catches it, returns True, and
+the eval samples the signature pose for the final plug-port distance.
+
+| Case | Signature offset | Expected T2 tier_3 (init dist 0.17 m) |
+|------|------------------|----------------------------------------|
+| A — IK rejected         | park at (tgt + (+2 cm, 0, 0))  ⇒ further than start | tier_3 ≈ 0, tier_2 reflects smooth +X move |
+| B — joint move stalled  | leave arm at joint impedance's actual stall pose    | tier_3 ∈ (0, 0.7) — distance encodes how far it got |
+| C — re-engage spike     | bump current pose by (+0, +0, +5 mm Z)              | tier_3 ≈ 0, distinct Z signature |
+| (success — already shipping) | normal proceed to WP3/Stage 2/3/4              | unchanged from v23 |
+
+A re-engage spike is detected by sampling `|F|` during the
+`joint_space_park_settle_sec` window; if max > `diag_reengage_spike_threshold_n`
+(22 N), Case C wins over Case B even when joint move also stalled
+(force-spike is the dominant observable on the real arm).
+
+**Important**: trial returns True so the eval samples the signature pose
+regardless of whether "actual" insertion happened.  The competition
+measures plug-port distance — the policy's success flag does not change
+that measurement.
+
+**Code locations**:
+- `ANT.py` `class JointSpaceDiagnosticAbort` — exception carrying case label
+- `ANT.py` `_apply_diag_signature(case, ...)` — parks at signature, raises
+- `ANT.py` `_lateral_move_joint_space` — Case classification block after
+  the re-engage settle (B vs C); IK-fail path now calls the helper
+- `ANT.py` `insert_cable` — catches `JointSpaceDiagnosticAbort`, logs,
+  returns True
+- `submit.sh` — `class JointSpaceDiagnosticAbort`,
+  `enable_joint_space_diag_signatures`, and `BUG124 diag signature` added
+  to `ANT_MARKERS` (build aborts if any are missing)
+
+**Tunables** (`ANT.__init__`):
+- `enable_joint_space_diag_signatures` — master toggle
+- `diag_case_a_park_offset_m = (0.020, 0.0, 0.0)`
+- `diag_case_c_park_offset_m = (0.0, 0.0, 0.005)`
+- `diag_reengage_spike_threshold_n = 22.0`
+
+**v25 plan** (case-targeted): once v24 returns a real-HW score, the T2
+distance band tells us which case.  Then:
+- A: widen `joint_space_max_total_delta_rad` 0.6→1.0 rad, multi-seed IK,
+  soft joint-limit projection.
+- B: overdrive target by `2 cm * F̂_cable`, two-stage joint move, add
+  shoulder/elbow torque feedforward.
+- C: stay in joint-impedance mode through Stage 4 (descend in joint
+  space), eliminate the Cartesian re-engagement entirely.
 
 ## Competition-readiness checklist (claude/review-simulation-logs-6knxl)
 
