@@ -1,0 +1,18 @@
+{"event": "startup", "trial": 0, "build_version": "local-4debc38-dirty", "high_tension_threshold_n": 19.0, "lateral_feedforward_n": 6.0, "t2_sfp_steps": 7, "t3_sc_step_m": 0.025, "lateral_stiff_n_per_m": 350.0, "anchor_bias_m": 0.02, "arrival_tolerance_m": 0.027, "arrival_max_retries": 2, "stage4_compliance": false, "yaw_alignment": true, "vision_sc": true}
+{"event": "trial_start", "trial": 1, "task_id": "task_1", "plug_name": "sfp_tip", "port_name": "sfp_port_0", "plug_type": "sfp", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 1, "baseline_n": 20.840677840463343, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "lateral_arrival", "trial": 1, "zone": "sfp", "label": "Stage 1 SFP T1 WP2", "attempt": 0, "tgt_x": -0.3845, "tgt_y": 0.2, "actual_x": -0.37788373372974254, "actual_y": 0.19738901310590082, "err_mm": 7.1128216567058935, "tolerance_mm": 27.0, "within_tol": true}
+{"event": "baseline", "trial": 1, "baseline_n": 19.536273021101877, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 1, "success": true, "final_tcp_x": -0.3844476891177599, "final_tcp_y": 0.1936356557797328, "final_tcp_z": 0.23183943142455318}
+{"event": "trial_start", "trial": 2, "task_id": "task_1", "plug_name": "sfp_tip", "port_name": "sfp_port_0", "plug_type": "sfp", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 2, "baseline_n": 20.60498509621691, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "joint_space_start", "trial": 2, "zone": "sfp", "label": "Stage 1 SFP T2 WP2", "tgt_x": -0.3845, "tgt_y": 0.2526, "delta_q_norm": 0.24849910834442268}
+{"event": "joint_space_final", "trial": 2, "zone": "sfp", "label": "Stage 1 SFP T2 WP2", "tgt_x": -0.3845, "tgt_y": 0.2526, "actual_x": -0.3849705355477565, "actual_y": 0.23883872318109842, "err_mm": 13.769318915187503, "within_tol": true, "ok": true}
+{"event": "trial_stage1_complete", "trial": 2, "zone": "sfp", "path": "joint_space"}
+{"event": "baseline", "trial": 2, "baseline_n": 20.473488521935405, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 2, "success": true, "final_tcp_x": -0.38869707474402354, "final_tcp_y": 0.26961377462858915, "final_tcp_z": 0.17723400824075233}
+{"event": "trial_start", "trial": 3, "task_id": "task_1", "plug_name": "sc_tip", "port_name": "sc_port_base", "plug_type": "sc", "time_limit_sec": 180.0}
+{"event": "baseline", "trial": 3, "baseline_n": 20.65126054200283, "high_tension": true, "threshold_n": 19.0, "n_samples": 20}
+{"event": "lateral_arrival", "trial": 3, "zone": "sc", "label": "Stage 1 SC WP2", "attempt": 0, "tgt_x": -0.47360077358525554, "tgt_y": 0.30121538644784374, "actual_x": -0.4694263854828017, "actual_y": 0.28014181442424746, "err_mm": 21.483038748361647, "tolerance_mm": 27.0, "within_tol": true}
+{"event": "baseline", "trial": 3, "baseline_n": 14.239244493813121, "high_tension": false, "threshold_n": 19.0, "n_samples": 20}
+{"event": "trial_end", "trial": 3, "success": true, "final_tcp_x": -0.4564357302733925, "final_tcp_y": 0.3097723527248669, "final_tcp_z": 0.06534281626000807}
