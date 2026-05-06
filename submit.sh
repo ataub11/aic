@@ -133,60 +133,89 @@ if [[ "$BAKED_VERSION" != "$BUILD_VERSION" ]]; then
   exit 1
 fi
 
-# Runtime verification: extract policy files from the image and check known
-# markers to ensure the source code (not stale install/ copy) and all expected
-# package members are in the image.  This is the final safeguard against the
-# Bug 90 gotcha and the Bug 123 "new file may not have shipped" gotcha.
-# Failures here ABORT the push — an image that fails verification is unshippable.
+# Runtime verification: run a bash command inside the image to find and grep
+# every copy of the policy files.  Uses --entrypoint /bin/bash to bypass the
+# router-addr check in the real entrypoint.  This avoids hardcoding the install
+# path (pixi env copy vs install/ copy) and checks ALL copies present in the
+# image — if any copy is missing a marker the build is considered stale.
+#
+# The old approach used `docker cp /ws_aic/install/aic_model/...` which was a
+# path that never existed; the `|| true` silently masked 100% of checks.
+# This version is fail-closed: any missing marker or docker run failure aborts.
 echo ""
 echo "=== Step 1b: Runtime verification (image content check) ==="
-TEMP_EXTRACT="/tmp/ant_policy_check_$$"
-mkdir -p "$TEMP_EXTRACT"
-trap 'rm -rf "$TEMP_EXTRACT"' EXIT
 
-CONTAINER_ID=$(docker create "${LOCAL_TAGGED}" 2>/dev/null) || {
-  echo "✗ FATAL: could not create container from ${LOCAL_TAGGED} for verification."
-  exit 1
-}
+# Markers are embedded directly in the script string to avoid quoting issues
+# when passing arrays with spaces through env vars.
+# Add a new line per bug whose presence in the deployed image must be confirmed.
+# Format: ANT_MARKERS entries are grepped against every ANT.py found in the
+# image; IK_MARKERS entries against every ur5e_kinematics.py.
+VERIFY_SCRIPT=$(cat <<'SCRIPT_END'
+set -e
+FAIL=0
 
-IMAGE_PKG_DIR="/ws_aic/install/aic_model/lib/python3.12/site-packages/ant_policy_node"
-
-# Extract every file we will verify.  Missing files are a hard failure — we
-# do not push images with unknown content.
-docker cp "${CONTAINER_ID}:${IMAGE_PKG_DIR}/ANT.py" "$TEMP_EXTRACT/ANT.py" 2>/dev/null \
-  || { echo "✗ FATAL: ${IMAGE_PKG_DIR}/ANT.py not present in image."; docker rm "$CONTAINER_ID" >/dev/null 2>&1; exit 1; }
-docker cp "${CONTAINER_ID}:${IMAGE_PKG_DIR}/ur5e_kinematics.py" "$TEMP_EXTRACT/ur5e_kinematics.py" 2>/dev/null \
-  || { echo "✗ FATAL: ${IMAGE_PKG_DIR}/ur5e_kinematics.py not present in image (Bug 123 module missing — joint-space IK would fail to import at runtime)."; docker rm "$CONTAINER_ID" >/dev/null 2>&1; exit 1; }
-docker rm "$CONTAINER_ID" >/dev/null 2>&1
-
-# Each marker is `description|file|grep-extended-regex`.  All markers must
-# match; any miss aborts the push.  Add a new line per bug whose presence in
-# the deployed image must be confirmed.
-MARKERS=(
-  "Bug 122 yaw correction (-1.7133)|ANT.py|-1\.7133"
-  "Bug 123 IK call site (solve_ik_dls)|ANT.py|solve_ik_dls"
-  "Bug 123 joint-space helper (_lateral_move_joint_space)|ANT.py|def _lateral_move_joint_space"
-  "Bug 123 joint-space master toggle (enable_joint_space_lateral)|ANT.py|enable_joint_space_lateral"
-  "Bug 123 IK module (solve_ik_dls definition)|ur5e_kinematics.py|def solve_ik_dls"
-  "Bug 123 IK module (geometric_jacobian)|ur5e_kinematics.py|def geometric_jacobian"
-  "Bug 123 IK module (joint_state_to_ordered_array)|ur5e_kinematics.py|def joint_state_to_ordered_array"
+# ── Marker definitions (add new bugs here) ────────────────────────────────────
+ANT_MARKERS=(
+  "-1.7133"                       # Bug 122 yaw correction
+  "solve_ik_dls"                  # Bug 123 IK call site in ANT.py
+  "def _lateral_move_joint_space" # Bug 123 joint-space helper
+  "enable_joint_space_lateral"    # Bug 123 master toggle
+)
+IK_MARKERS=(
+  "def solve_ik_dls"
+  "def geometric_jacobian"
+  "def joint_state_to_ordered_array"
 )
 
-VERIFY_FAILED=0
-for marker in "${MARKERS[@]}"; do
-  IFS='|' read -r desc file pattern <<<"$marker"
-  if grep -Eq "$pattern" "$TEMP_EXTRACT/$file" 2>/dev/null; then
-    echo "✓ ${desc}"
-  else
-    echo "✗ MISSING: ${desc} (expected pattern '${pattern}' in ${file})"
-    VERIFY_FAILED=1
-  fi
+# ── File discovery ────────────────────────────────────────────────────────────
+ANT_FILES=$(find /ws_aic -name "ANT.py" -path "*/ant_policy_node/*" 2>/dev/null | sort)
+IK_FILES=$(find /ws_aic  -name "ur5e_kinematics.py"                  2>/dev/null | sort)
+
+if [[ -z "$ANT_FILES" ]]; then
+  echo "✗ MISSING: ANT.py not found anywhere under /ws_aic"
+  FAIL=1
+fi
+if [[ -z "$IK_FILES" ]]; then
+  echo "✗ MISSING: ur5e_kinematics.py not found anywhere under /ws_aic (Bug 123 module absent — joint-space IK will ImportError at runtime)"
+  FAIL=1
+fi
+
+# ── Marker checks ─────────────────────────────────────────────────────────────
+for f in $ANT_FILES; do
+  for m in "${ANT_MARKERS[@]}"; do
+    if grep -qF "$m" "$f" 2>/dev/null; then
+      echo "✓ ANT.py [$f]: $m"
+    else
+      echo "✗ MISSING: ANT.py [$f] lacks marker: $m"
+      FAIL=1
+    fi
+  done
 done
 
-if [[ "$VERIFY_FAILED" -ne 0 ]]; then
+for f in $IK_FILES; do
+  for m in "${IK_MARKERS[@]}"; do
+    if grep -qF "$m" "$f" 2>/dev/null; then
+      echo "✓ ur5e_kinematics.py [$f]: $m"
+    else
+      echo "✗ MISSING: ur5e_kinematics.py [$f] lacks marker: $m"
+      FAIL=1
+    fi
+  done
+done
+
+exit $FAIL
+SCRIPT_END
+)
+
+VERIFY_OUTPUT=$(docker run --rm --entrypoint /bin/bash \
+  "${LOCAL_TAGGED}" -c "$VERIFY_SCRIPT" 2>&1) && VERIFY_EXIT=0 || VERIFY_EXIT=$?
+
+echo "$VERIFY_OUTPUT"
+
+if [[ "$VERIFY_EXIT" -ne 0 ]]; then
   echo ""
   echo "✗ FATAL: image content verification failed."
-  echo "  The image at ${LOCAL_TAGGED} is missing expected code markers."
+  echo "  One or more expected code markers are missing from the built image."
   echo "  Likely causes: (a) install/ tree out of sync with source (Bug 90 saga),"
   echo "  (b) docker layer cache served a stale COPY layer, or (c) a new package"
   echo "  member was not added to the install/ tree."
@@ -194,9 +223,6 @@ if [[ "$VERIFY_FAILED" -ne 0 ]]; then
   exit 1
 fi
 echo "✓ All image content markers verified — safe to push."
-
-trap - EXIT
-rm -rf "$TEMP_EXTRACT"
 
 # ── Step 2: Verify locally ─────────────────────────────────────────────────────
 if [[ "$SKIP_VERIFY" == "false" ]]; then
