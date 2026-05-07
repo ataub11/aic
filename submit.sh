@@ -184,9 +184,13 @@ if [[ -z "$IK_FILES" ]]; then
 fi
 
 # ── Marker checks ─────────────────────────────────────────────────────────────
+# Note: `-e "$m"` is REQUIRED — markers can start with `-` (e.g. -1.7133),
+# and without `-e`/`--` grep parses leading-dash markers as flags
+# (`-1.7133` → `-1` context-lines + pattern `.7133`), silently checking
+# the wrong thing.  This caused every -1.7133 check since Bug 122 to lie.
 for f in $ANT_FILES; do
   for m in "${ANT_MARKERS[@]}"; do
-    if grep -qF "$m" "$f" 2>/dev/null; then
+    if grep -qF -e "$m" "$f" 2>/dev/null; then
       echo "✓ ANT.py [$f]: $m"
     else
       echo "✗ MISSING: ANT.py [$f] lacks marker: $m"
@@ -197,7 +201,7 @@ done
 
 for f in $IK_FILES; do
   for m in "${IK_MARKERS[@]}"; do
-    if grep -qF "$m" "$f" 2>/dev/null; then
+    if grep -qF -e "$m" "$f" 2>/dev/null; then
       echo "✓ ur5e_kinematics.py [$f]: $m"
     else
       echo "✗ MISSING: ur5e_kinematics.py [$f] lacks marker: $m"
