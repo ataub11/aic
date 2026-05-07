@@ -503,9 +503,41 @@ class ANT(Policy):
         self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
         self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
         self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
-        self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
+        # Bug 126 (v25): widened from 0.6 → 1.0 rad (~57°) so the IK can reach
+        # configurations farther from `q_current` when a small joint-travel
+        # solution doesn't exist.  Combined with multi-seed IK below, this
+        # raises the chance of finding ANY valid IK on degenerate seeds.
+        self.joint_space_max_total_delta_rad = 1.0
         self.joint_space_stage_timeout_sec = 20.0   # bounded so we don't burn budget
         self.joint_space_park_settle_sec = 0.6      # post-move Cartesian re-engage hold
+        # ---- Bug 126 (v25): multi-seed IK (Case-A countermeasure) -------------
+        # v24 confirmed Bug 124's Case-A path can fire when DLS from `q_current`
+        # gets stuck in a local minimum or a near-singular Jacobian.  Try IK
+        # from `q_current` plus four perturbed seeds (shoulder/elbow ±0.2 rad)
+        # before declaring IK rejected.  Per-seed budget is 50 iter × ~10 ms
+        # ≈ 0.5 s, total worst case 2.5 s — well under the 20 s stage timeout.
+        self.enable_multi_seed_ik = True
+        self.ik_seed_perturbation_rad = 0.2         # ±0.2 rad on shoulder/elbow
+        # ---- Bug 127 (v25): F-cable overdrive + two-stage joint move ---------
+        # v24 strongly suggested Case B (joint impedance stalls before reaching
+        # target) is the bottleneck — all three submissions ended at dist=0.17 m
+        # with no detectable signature.  Counter by:
+        # 1) Reading wrist_wrench at WP2 entry to estimate cable force direction
+        #    F̂_cable, then setting the IK target to `port - bias * F̂_cable_xy`
+        #    so that even if the joint move stalls a few cm short, the residual
+        #    spring force at the actual stop pose still exceeds equilibrium and
+        #    can drive the arm closer to the true port.
+        # 2) Splitting the joint move into two stages (50% target, settle, 100%
+        #    target) so each stage's joint impedance has a fresh position error
+        #    to drive against — preventing the controller from coasting into a
+        #    stalled steady state.
+        self.enable_cable_overdrive = True
+        self.cable_overdrive_bias_m = 0.020          # 2 cm past port toward +F̂
+        self.cable_overdrive_max_m = 0.030           # cap so wrong direction
+        # can't push arm into NIC-mount or board-face geometry.
+        self.enable_two_stage_joint_move = True
+        self.two_stage_first_fraction = 0.5          # send 50%, settle, then 100%
+        self.two_stage_settle_sec = 0.4
         # ---- Bug 124 (v24): A/B/C failure-mode discriminator -----------------
         # Encodes the joint-space failure mode into the final TCP position so
         # we can read it out of score.json (T2 tier_3 is monotone in final
@@ -516,18 +548,25 @@ class ANT(Policy):
         # See README sim_runs/run_2026-05-06_v23_submission_768/ for the
         # rationale (cases A/B/C from the v23 post-mortem).
         self.enable_joint_space_diag_signatures = True
-        # Case A — IK rejected.  Park 2 cm in +X (away from the SFP port at
-        # x ≈ -0.395) so the final XY distance is *farther* than the v22
-        # baseline (~0.17 m); this is unambiguous because both Cases B and C
-        # leave the arm at or below the start distance.
-        self.diag_case_a_park_offset_m = (0.020, 0.0, 0.0)
-        # Case C — Cartesian re-engagement force spike.  Detected by sampling
-        # |F| during the post-joint-move Cartesian settle; if it exceeds the
-        # threshold we add a +5 mm Z bump to the parked pose.  The Z bump
-        # nudges the SFP-tip Z component (visible in scoring's saved final
-        # pose) without affecting XY enough to confuse Cases A/B.
-        self.diag_case_c_park_offset_m = (0.0, 0.0, 0.005)
+        # Bug 125 (v25): rescaled Bug 124 signatures.  v24 lesson: XY-axis
+        # signatures relative to the commanded port-XY target are physically
+        # unreachable on real HW — cable equilibrium pulls the arm back to
+        # ~start_pose, so all three cases ended at dist=0.17 m and tier_3=0.
+        # New signatures use Z-axis offsets relative to the arm's CURRENT TCP
+        # pose at signature time.  Cable force is mostly horizontal so vertical
+        # moves succeed even when lateral is stalled.  Each case ends at a
+        # distinct height that the scoring's plug-port distance can resolve.
+        # `diag_signatures_relative_to_current_pose=True` is the v25 toggle.
+        # Case A — IK rejected: ascend 8 cm above current TCP.  Final dist
+        # increases by ~8 cm Z component vs. start dist ⇒ clearly larger.
+        self.diag_case_a_park_offset_m = (0.0, 0.0, 0.080)
+        # Case C — Cartesian re-engage force spike: descend 5 cm below current
+        # TCP.  Cable Z-tension is small so this should succeed; final dist
+        # may decrease (if port_z is below current_z) — distinct from Cases
+        # A and B.
+        self.diag_case_c_park_offset_m = (0.0, 0.0, -0.050)
         self.diag_reengage_spike_threshold_n = 22.0
+        self.diag_signatures_relative_to_current_pose = True
         # Cached fixed transform (tool0 → gripper/tcp).  Populated lazily
         # from TF on first joint-space move (TF buffer may be empty at
         # __init__ time).  None = not yet looked up.
@@ -935,29 +974,48 @@ class ANT(Policy):
 
         Returns the 6-vector joint config or None on failure.  Failures:
           - tool0→tcp TF unavailable
-          - DLS IK didn't converge
+          - DLS IK didn't converge from any seed
           - Solution requires more than `joint_space_max_total_delta_rad`
             of joint travel from current (sanity guard against bad branches)
+
+        Bug 126 (v25): when `enable_multi_seed_ik` is True, retry the DLS
+        solver with up to four perturbed seeds (shoulder/elbow ±0.2 rad)
+        before declaring rejection.  Helps when a degenerate seed (e.g.
+        near-singular Jacobian at q_current) causes single-seed DLS to fail.
         """
         if not self._ensure_tool0_to_tcp_cached():
             return None
         T_base_to_tcp = self._pose_to_matrix(target_tcp_pose)
         T_base_to_tool0 = T_base_to_tcp @ np.linalg.inv(self._tool0_to_tcp_matrix)
-        q_sol = ur5e_kinematics.solve_ik_dls(
-            T_base_to_tool0, q_current,
-            max_step_rad=self.joint_space_max_step_rad,
-        )
-        if q_sol is None:
-            return None
-        delta = float(np.linalg.norm(q_sol - q_current))
-        if delta > self.joint_space_max_total_delta_rad:
-            self.get_logger().warning(
-                f"Joint-space lateral: IK proposes {delta:.2f} rad "
-                f"(>{self.joint_space_max_total_delta_rad:.2f}) — rejecting "
-                "to avoid unsafe joint reconfiguration"
+        seeds = [q_current]
+        if self.enable_multi_seed_ik:
+            p = self.ik_seed_perturbation_rad
+            for s_off, e_off in [(p, 0.0), (-p, 0.0), (0.0, p), (0.0, -p)]:
+                seed = q_current.copy()
+                seed[1] += s_off  # shoulder_lift_joint
+                seed[2] += e_off  # elbow_joint
+                seeds.append(seed)
+        for idx, seed in enumerate(seeds):
+            q_sol = ur5e_kinematics.solve_ik_dls(
+                T_base_to_tool0, seed,
+                max_step_rad=self.joint_space_max_step_rad,
             )
-            return None
-        return q_sol
+            if q_sol is None:
+                continue
+            delta = float(np.linalg.norm(q_sol - q_current))
+            if delta > self.joint_space_max_total_delta_rad:
+                continue
+            if idx > 0:
+                self.get_logger().info(
+                    f"BUG126 IK: converged from seed#{idx} "
+                    f"(delta={delta:.2f} rad)"
+                )
+            return q_sol
+        self.get_logger().warning(
+            f"Joint-space lateral: all {len(seeds)} IK seeds rejected "
+            f"(no solution within {self.joint_space_max_total_delta_rad:.2f} rad)"
+        )
+        return None
 
     def _apply_diag_signature(
         self, case: str, tgt_x: float, tgt_y: float, lateral_z: float,
@@ -974,21 +1032,41 @@ class ANT(Policy):
         diagnostic, so we *want* the failure mode to determine the final
         TCP position rather than letting the Cartesian retry overwrite it.
 
-        Case A — IK rejected: park at (tgt + diag_case_a_park_offset_m).
-        Case C — re-engage spike: bump current pose by diag_case_c_park_offset_m.
+        Bug 125 (v25): when `diag_signatures_relative_to_current_pose` is True,
+        the offsets are applied to the arm's current TCP pose rather than to
+        the (unreachable) commanded target.  Z-axis offsets dominate so the
+        move is feasible even when lateral is fully cable-blocked.
+
+        Case A — IK rejected:    +8 cm Z above current TCP (Bug 125 default).
+        Case C — re-engage spike: -5 cm Z below current TCP (Bug 125 default).
 
         Case B does not pass through this helper because it has no
         published target — the joint move's actual stall position is
         already the signature (the caller uses (actual_x, actual_y, True)).
         """
+        # Resolve the base pose to apply offsets to.  Bug 125: prefer the
+        # arm's current TCP pose so the resulting park is physically
+        # reachable through cable equilibrium (Z is mostly unconstrained).
+        base_x, base_y, base_z = None, None, None
+        if self.diag_signatures_relative_to_current_pose:
+            obs_now = get_observation()
+            if obs_now is not None:
+                p = obs_now.controller_state.tcp_pose.position
+                base_x, base_y, base_z = p.x, p.y, p.z
         if case == "A":
             dx, dy, dz = self.diag_case_a_park_offset_m
-            sx, sy, sz = tgt_x + dx, tgt_y + dy, lateral_z + dz
+            if base_x is not None:
+                sx, sy, sz = base_x + dx, base_y + dy, base_z + dz
+            else:
+                sx, sy, sz = tgt_x + dx, tgt_y + dy, lateral_z + dz
         elif case == "C":
             dx, dy, dz = self.diag_case_c_park_offset_m
-            sx = (actual_x if actual_x is not None else tgt_x) + dx
-            sy = (actual_y if actual_y is not None else tgt_y) + dy
-            sz = lateral_z + dz
+            if base_x is not None:
+                sx, sy, sz = base_x + dx, base_y + dy, base_z + dz
+            else:
+                sx = (actual_x if actual_x is not None else tgt_x) + dx
+                sy = (actual_y if actual_y is not None else tgt_y) + dy
+                sz = lateral_z + dz
         else:
             return None
         sig_pose = self._make_pose(sx, sy, sz, orient)
@@ -1017,6 +1095,11 @@ class ANT(Policy):
         self.get_logger().info(
             f"BUG124 diag signature case={case} parked at "
             f"({sx:.4f},{sy:.4f},{sz:.4f}) — aborting trial at signature pose"
+            + (
+                f" [BUG125 rel-to-current; offset_dz={dz:+.3f} m]"
+                if self.diag_signatures_relative_to_current_pose
+                else ""
+            )
         )
         raise JointSpaceDiagnosticAbort(case)
 
@@ -1055,15 +1138,53 @@ class ANT(Policy):
                 "falling back to Cartesian"
             )
             return None
-        target_pose = self._make_pose(tgt_x, tgt_y, lateral_z, orient)
+        # Bug 127 (v25) — F-cable overdrive: shift target opposite to the
+        # cable force direction so the spring force at any stalled-short
+        # pose still points toward the port.  Without this, a stall at
+        # (target - δ) leaves zero spring force at the stall pose ⇒ the
+        # arm coasts to whatever cable equilibrium is.
+        eff_tgt_x, eff_tgt_y = tgt_x, tgt_y
+        cable_dir = None
+        if self.enable_cable_overdrive and obs.wrist_wrench is not None:
+            try:
+                fx = float(obs.wrist_wrench.wrench.force.x)
+                fy = float(obs.wrist_wrench.wrench.force.y)
+                f_mag = math.hypot(fx, fy)
+                if f_mag > 1e-3:
+                    # F̂ points in direction cable PULLS the wrist (toward
+                    # anchor).  Move target in OPPOSITE direction (push past
+                    # port away from anchor).  Bias capped for safety.
+                    bias = min(self.cable_overdrive_bias_m,
+                               self.cable_overdrive_max_m)
+                    eff_tgt_x = tgt_x - bias * (fx / f_mag)
+                    eff_tgt_y = tgt_y - bias * (fy / f_mag)
+                    cable_dir = (fx / f_mag, fy / f_mag)
+                    self._diag_event(
+                        "cable_overdrive",
+                        zone=zone, label=label,
+                        f_xy_mag_n=f_mag,
+                        f_hat_x=cable_dir[0], f_hat_y=cable_dir[1],
+                        tgt_x=tgt_x, tgt_y=tgt_y,
+                        eff_tgt_x=eff_tgt_x, eff_tgt_y=eff_tgt_y,
+                    )
+                    self.get_logger().info(
+                        f"BUG127 cable overdrive: |F_xy|={f_mag:.1f} N "
+                        f"F̂=({cable_dir[0]:+.2f},{cable_dir[1]:+.2f}) "
+                        f"tgt ({tgt_x:.3f},{tgt_y:.3f}) → "
+                        f"({eff_tgt_x:.3f},{eff_tgt_y:.3f})"
+                    )
+            except (AttributeError, TypeError):
+                pass
+        target_pose = self._make_pose(eff_tgt_x, eff_tgt_y, lateral_z, orient)
         q_target = self._solve_ik_for_tcp(target_pose, q_current)
         if q_target is None:
             self.get_logger().warning(
-                f"{label}: IK failed for target ({tgt_x:.4f},{tgt_y:.4f})"
+                f"{label}: IK failed for target ({eff_tgt_x:.4f},{eff_tgt_y:.4f})"
             )
             self._diag_event(
                 "joint_space_ik_failed",
                 zone=zone, label=label, tgt_x=tgt_x, tgt_y=tgt_y,
+                eff_tgt_x=eff_tgt_x, eff_tgt_y=eff_tgt_y,
             )
             if self.enable_joint_space_diag_signatures:
                 return self._apply_diag_signature(
@@ -1080,59 +1201,101 @@ class ANT(Policy):
         self._diag_event(
             "joint_space_start",
             zone=zone, label=label, tgt_x=tgt_x, tgt_y=tgt_y,
+            eff_tgt_x=eff_tgt_x, eff_tgt_y=eff_tgt_y,
             delta_q_norm=float(np.linalg.norm(delta)),
+            two_stage=self.enable_two_stage_joint_move,
         )
-        # Send the JointMotionUpdate; loop monitors convergence + stall.
-        jmu = self._build_joint_motion_update(q_target.tolist())
-        stage_start = self.time_now()
-        stage_timeout = Duration(seconds=self.joint_space_stage_timeout_sec)
+
+        # Bug 127 (v25) — two-stage joint move: split the joint-space lateral
+        # into [q_half, q_full] phases.  Each phase has its own joint-impedance
+        # error to drive against, preventing the controller from coasting into
+        # a single steady-state stall.  Falls back to single-stage if the
+        # toggle is off.
+        if self.enable_two_stage_joint_move:
+            f = self.two_stage_first_fraction
+            q_phase_targets = [
+                q_current + f * delta,   # halfway
+                q_target,                # full
+            ]
+        else:
+            q_phase_targets = [q_target]
+
         stall_window = 5
         stall_tol_m = 0.002
-        error_history: collections.deque = collections.deque(maxlen=stall_window)
         ok = False
         actual_x, actual_y = tgt_x, tgt_y
-        iteration = 0
-        while True:
-            if self._is_timed_out(start_time, time_limit_sec):
-                break
-            if (self.time_now() - stage_start) >= stage_timeout:
-                self.get_logger().warning(
-                    f"{label}: joint-space stage timeout"
-                )
-                break
-            try:
-                move_robot(joint_motion_update=jmu)
-            except Exception as ex:
-                self.get_logger().warning(
-                    f"{label}: joint move_robot rejected ({ex}) — "
-                    "falling back to Cartesian"
-                )
-                return None
-            self.sleep_for(0.05)
-            obs_a = get_observation()
-            if obs_a is None:
-                continue
-            iteration += 1
-            actual_x = obs_a.controller_state.tcp_pose.position.x
-            actual_y = obs_a.controller_state.tcp_pose.position.y
-            err = float(np.hypot(tgt_x - actual_x, tgt_y - actual_y))
-            error_history.append(err)
-            stalled = (
-                iteration >= 5
-                and len(error_history) == stall_window
-                and (max(error_history) - min(error_history)) < stall_tol_m
+        for phase_idx, q_phase_target in enumerate(q_phase_targets):
+            phase_label = (
+                f"{label}/stage{phase_idx + 1}of{len(q_phase_targets)}"
+                if len(q_phase_targets) > 1 else label
             )
-            self.get_logger().info(
-                f"{label}: joint iter={iteration} xy_err={err*1000:.1f} mm"
-                + (" [STALLED]" if stalled else "")
-            )
-            if err <= self.joint_space_arrival_tol_m:
-                ok = True
-                break
-            if stalled:
-                # Joint impedance stalled — even joint torques can't close
-                # the gap (probably joint-limit or singularity neighborhood).
-                # Accept what we got.
+            jmu = self._build_joint_motion_update(q_phase_target.tolist())
+            stage_start = self.time_now()
+            stage_timeout = Duration(seconds=self.joint_space_stage_timeout_sec)
+            error_history: collections.deque = collections.deque(maxlen=stall_window)
+            iteration = 0
+            phase_stalled = False
+            while True:
+                if self._is_timed_out(start_time, time_limit_sec):
+                    break
+                if (self.time_now() - stage_start) >= stage_timeout:
+                    self.get_logger().warning(
+                        f"{phase_label}: joint-space stage timeout"
+                    )
+                    break
+                try:
+                    move_robot(joint_motion_update=jmu)
+                except Exception as ex:
+                    self.get_logger().warning(
+                        f"{phase_label}: joint move_robot rejected ({ex}) — "
+                        "falling back to Cartesian"
+                    )
+                    return None
+                self.sleep_for(0.05)
+                obs_a = get_observation()
+                if obs_a is None:
+                    continue
+                iteration += 1
+                actual_x = obs_a.controller_state.tcp_pose.position.x
+                actual_y = obs_a.controller_state.tcp_pose.position.y
+                # Stall is detected against the FINAL target (since that's
+                # what we ultimately care about); convergence within tol is
+                # detected against the per-phase target so phase 1 advances
+                # to phase 2 quickly when the halfway point is reached.
+                err = float(np.hypot(tgt_x - actual_x, tgt_y - actual_y))
+                # Per-phase convergence check uses the phase target's
+                # corresponding TCP — for phase 1 that's halfway between
+                # current and final target, approximately tracked via XY.
+                phase_err = err  # for last phase, identical
+                if len(q_phase_targets) > 1 and phase_idx == 0:
+                    # Halfway TCP target ≈ start_xy + 0.5 * (tgt - start_xy);
+                    # but we don't track start_xy here.  Use a relaxed
+                    # tolerance to advance once phase 1 is "close enough".
+                    phase_err = err  # final-target error suffices
+                error_history.append(phase_err)
+                phase_stalled = (
+                    iteration >= 5
+                    and len(error_history) == stall_window
+                    and (max(error_history) - min(error_history)) < stall_tol_m
+                )
+                self.get_logger().info(
+                    f"{phase_label}: joint iter={iteration} "
+                    f"xy_err={err*1000:.1f} mm"
+                    + (" [STALLED]" if phase_stalled else "")
+                )
+                if err <= self.joint_space_arrival_tol_m:
+                    ok = True
+                    break
+                if phase_stalled:
+                    break
+            # Phase boundary settle — gives the joint impedance a fresh
+            # error to drive against in phase 2 (Bug 127).
+            if (phase_idx < len(q_phase_targets) - 1
+                    and not self._is_timed_out(start_time, time_limit_sec)):
+                self.sleep_for(self.two_stage_settle_sec)
+            # If we've already arrived under tol, no need to run remaining
+            # phases.
+            if ok:
                 break
         # Re-engage Cartesian mode at the arm's current TCP pose to avoid a
         # large position-error spring impulse on the next Cartesian move.

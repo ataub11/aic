@@ -163,6 +163,13 @@ ANT_MARKERS=(
   "class JointSpaceDiagnosticAbort"        # Bug 124 A/B/C discriminator class
   "enable_joint_space_diag_signatures"     # Bug 124 master toggle
   "BUG124 diag signature"                  # Bug 124 runtime log line
+  "diag_signatures_relative_to_current_pose"  # Bug 125 rescaled signatures
+  "BUG125 rel-to-current"                  # Bug 125 runtime log line
+  "enable_multi_seed_ik"                   # Bug 126 multi-seed IK toggle
+  "BUG126 IK"                              # Bug 126 runtime log line
+  "enable_cable_overdrive"                 # Bug 127 overdrive toggle
+  "enable_two_stage_joint_move"            # Bug 127 two-stage toggle
+  "BUG127 cable overdrive"                 # Bug 127 runtime log line
 )
 IK_MARKERS=(
   "def solve_ik_dls"
