@@ -139,6 +139,53 @@ already showed T1=61 with a lucky partial insert).
   success continues to Stage 4 descent; Case A aborts at signature).
   Tier_2 ≈ 0 ⇒ Case A; tier_2 > 10 ⇒ true success ⇒ score ≥100.
 
+## v25 local sim checklist (run before ./submit.sh v25)
+
+Sim does NOT reproduce the real-HW cable-tension problem (MuJoCo cable is
+axially rigid, Bug 86), so T2 will score ~37 in sim regardless. The only
+goal of a local run is to **catch Python/runtime errors that would burn the
+May 8 slot**.
+
+### What to look for in policy stdout
+
+```bash
+# Crash check — anything here = DO NOT submit
+grep -E "Traceback|^Error:|Exception" policy.log | head -20
+
+# All 3 trials finished
+grep "ANT-DIAG event=trial_end" policy.log     # expect 3 lines
+
+# v25 code paths fired on T2
+grep "BUG127 cable overdrive" policy.log       # F-cable overdrive computed
+grep "BUG126 IK" policy.log                    # only if multi-seed triggered
+grep "joint_space_start" policy.log            # joint-space loop entered on T2
+grep "BUG124 diag signature" policy.log        # only if diag fired (A/B/C case)
+grep "BUG125 rel-to-current" policy.log        # only if diag fired
+
+# Confirm build version (should not be 'unknown')
+grep "build_version" policy.log | head -1
+```
+
+### Pass criteria
+
+| Check | Required |
+|---|---|
+| No `Traceback` / `Exception` | **hard gate — do not submit if any** |
+| 3× `event=trial_end` | all 3 trials must complete |
+| `joint_space_start` on T2 | joint-space code path entered |
+| `BUG127 cable overdrive` on T2 | F-cable direction estimated |
+| T1 sim score ≥ 50 | no T1 regression |
+| T3 sim score ≥ 30 | no T3 regression (Bug 122 yaw preserved) |
+
+### What NOT to worry about in sim
+
+- T2 sim score: will be ~37 regardless — sim cable is inextensible, so
+  joint-space trivially converges in sim.  Means nothing about real HW.
+- `BUG126 IK: converged from seed#N` absent: seed#0 always converges in
+  sim since no cable equilibrium stall.  Absence is expected.
+- `BUG124 diag signature` absent: signature only fires when joint move
+  fails/stalls or re-engage spikes.  Sim joint-space will succeed cleanly.
+
 ## Real-HW vs sim variance pattern (key insight)
 
 Sim consistently produces ~88 with v15 code. Real HW oscillates between
