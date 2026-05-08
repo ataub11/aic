@@ -13,7 +13,6 @@ evdev = ">=1.9.2,<2"
 [dependencies]
 isort = "==5.13.2"                                                                     # version bundled by the vscode extension
 json5 = ">=0.13.0,<0.14"                                                               # version bundled by the vscode extension
-opencv = "<4.13.0"
 packaging = ">=24.2,<26.0"                                                             # required by lerobot==0.4.3
 pyright = "==1.1.408"
 ros-kilted-aic-control-interfaces = { path = "aic_interfaces/aic_control_interfaces" }

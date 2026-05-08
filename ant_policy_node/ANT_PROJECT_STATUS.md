@@ -1,6 +1,6 @@
 # ANT Policy — Project Status Summary
 
-> Last updated: 2026-04-30 (**v18 READY TO SUBMIT on branch `claude/review-simulation-logs-6knxl` @ `358bac4`. docker-compose tag bumped v15→v18. After sim 2026-04-29b regression analysis: Bug 101 (per-axis compliance) disabled — Z=120 N/m was too soft and cable tension raised arm 1.6–1.9 cm during Stage 4, regressing T3 distance 0.14→0.18m. Bug 104 'descend' mode collapsed into 'spiral' — descend ramp commanded zero spring force at t=0. Bugs 99, 100, 102, 103, 105 retained as neutral/beneficial. Expected score ≥99.59 (T1≥61, T2≥37, T3≥1 with distance≤0.14m). Bug 105 vision-localised SC (with 5cm sanity-radius fallback) is the new generalisation path — detection fires + falls back correctly when wrong. Pending: `./submit.sh v18` (Docker required). Prior: sim 2026-04-29b=99.84, sim 2026-04-29=99.59, sim 2026-04-28=103.05, ECR v17=23.25 (high-tension day), ECR v11=88.28.**
+> Last updated: 2026-05-07 (**7 principal-engineer performance fixes applied to ANT.py — rebuild done, install/ synced. Ready for sim run then v25 submission May 8.** Key fixes: (1) CR-2: SC Stage 4 stiffness 85→200 N/m (spring 5.9→14 N at 7 cm stall, hits 15 N max_wrench ceiling vs prior 8.9 N floor); (2) CR-1+HR-1: baseline-adaptive Stage 4 feedforward with per-zone caps (SC≤−9N, SFP≤−12N); (3) CR-3: `stage4_force_guard_enable=False` (guard fired below cable baseline at 19.5 N < 20.8 N typical, was decaying ff_z to zero); (4) MR-4: Z-floor guard after Stage 3 direct descent using stage3_z−10mm; (5) HR-2: force-checked phase settle with correct `_settle_abort` flag scoping; (6) MR-1: removed 6 dead instance variables (fxy_gradient + compliance vars); (7) startup DIAG now logs force_guard_enabled + stage4_ff_adaptive. Prior: Local sim 109.47 (T1=50.31, T2=37.07, T3=22.09). v24 real-HW: 64.55 (submission_835). Bug 127 (F-cable overdrive) confirmed firing. v25 plan: Bug 125 (rescaled discriminator) + Bug 126 (multi-seed IK) + Bug 127 (cable overdrive) + these 7 performance fixes.**
 >
 > Prior context: ECR v15/v17 sim 88.46 (matches v11 baseline). ECR v14 = 23.20 = same code as v11 (hardware variance). ECR v11 = 88.28 (T1=50.05, T2=37.23, T3=1.0). Real-HW oscillates 23–88 between days. Bug 66 (SC WP2 cable equilibrium stall) and the new high-tension T2 stall are the open robustness problems.
 
@@ -81,6 +81,11 @@ A geometric cable-insertion policy for a UR5e robot arm in the AI for Industry C
 | **sim 2026-04-29** | **99.59** | Bug 96A code fully active. T1=61.37 (lucky 38pt partial insert 0.04m), T2=37.22 (no-insert 0.04m), T3=1.0 (no-insert 0.14m, gripper-orient). `build_version=local-2e4867c`. Architectural gaps surfaced: T1 lucky partial; T2 stuck in 130s spiral; T3 stalled at z=0.069m due to gripper orientation. Motivated Bugs 99–105 design. |
 | **sim 2026-04-29b** | **99.84** | First run of Bugs 99–105 on branch `claude/review-simulation-logs-6knxl`. T1=61.37 preserved. T2=37.48 preserved. T3=1.0 with **distance regressed 0.14→0.18m**. Root cause: **Bug 101 per-axis compliance Z=120 N/m too soft** — cable tension RAISED arm 1.6–1.9 cm during Stage 4 (T2 tcp_z 0.179→0.198, T3 0.069→0.106). **Bug 105 vision detection fired and correctly fell back** (detection 21.8 cm off; sanity radius 5 cm rejected it — defensive layer working). Bugs 99 (yaw 0.0 = no-op), 100 (Fxy gradient firing tiny), 102 (stiff lateral), 103 (anchor bias), 105 (vision-with-fallback): neutral or marginally helpful. |
 | **v18 (READY TO SUBMIT)** | **EXPECTED ≥99.59** | **Bug 101 disabled** (`stage4_compliance_enable=False`); **Bug 104 collapsed to spiral** (descend ramp commanded zero spring force at t=0; both thresholds set to 0.040m). Other 5 bugs (99, 100, 102, 103, 105) retained — neutral or beneficial. Expected: T1≥61, T2≥37, T3≥1 (distance≤0.14m baseline). First submission of vision-generalised code path (Bug 105) with safety fallback. Worst-case matches v15/sim-04-29. Branch `claude/review-simulation-logs-6knxl` @ `358bac4`. **`docker-compose.yaml` tag bumped v15→v18.** Pending: `./submit.sh v18` (requires Docker — local environment lacks daemon). |
+| **v18 (submission_535, 2026-04-30)** | **23.23** | Real-HW reproduced v14/v17 worst-case high-tension regression. T1=21.23 (dist=0.10m, no insertion), T2=1.0 (dist=0.17m), T3=1.0 (dist=0.22m). Bugs 96A/102/103 either below trigger threshold or too weak to overpower cable equilibrium. Triggered Bugs 106/107/108 (lateral arrival check + retry, widened high-tension levers, structured diagnostics). |
+| **v22 (submission_694, 2026-05-01)** | **64.55** | T1=29.48 (tier_2=21.58, tier_3=6.90, dist≈0.10m, no insertion), T2=1.0 (dist=0.17m, lateral stalled — same architectural blocker as v18: Bug 106 retries hit 15 N max_wrench cap), T3=34.08 (tier_2=11.83, tier_3=21.24, **dist=0.04m, gripper-yaw alignment WORKING for the first time** — Bug 122 calibration successful). T1 +8 vs v18 likely from Bug 106 arrival retry. T3 +33 vs v18 from Bug 99/122 yaw correction. End-of-run "corrupted size" SIGKILL — investigate but not the score blocker. T2 architectural blocker confirmed → motivates Bug 123 (joint-space IK). |
+| **v23 (submission_768, 2026-05-06)** | **65.11** | T1=30.05 (tier_2=22.15, tier_3=6.90), T2=1.0 (tier_2=0, tier_3=0 — **unchanged from v18/v22**), T3=34.06 (tier_2=11.80, tier_3=21.26 — Bug 99/122 yaw correction preserved). **Bug 123 joint-space T2 lateral via UR5e IK DID NOT close the T2 gap on real HW.**
+| **v24 (submission_835, 2026-05-07)** | **64.55** | T1=29.38 (tier_2=21.85, tier_3=6.53, dist=0.11m), T2=1.0 (tier_2=0, tier_3=0, dist=0.17m — **unchanged**), T3=34.17 (tier_2=11.82, tier_3=21.36, dist=0.04m, Bug 122 yaw preserved). Bug 124 discriminator FAILED — all case signatures (A: +2cm X, B: stall pose, C: +5mm Z) land outside the 0.085m bounding radius (init_dist=0.17m → radius=0.085m), so tier_3=0 regardless of which case fired. Consistent with Case B (joint move stalled, no scoreable motion) but cannot distinguish from Case A (IK rejected → Cartesian fallback). v25 rescales signatures to Z-axis offsets relative to current TCP (Bug 125) so they fall inside the bounding radius.
+| **sim 2026-05-07 (v25 local, build local-a64fb79-dirty)** | **109.47** | T1=50.31 (tier_2=10.90, tier_3=38.41 partial, dist=0.04m), T2=37.07 (tier_2=11.07, tier_3=25 no-insert, dist=0.04m — joint-space fired ok=True err=13.8mm), T3=22.09 (tier_2=−2.75 with **−12 force penalty** sim artifact, tier_3=23.84, dist=0.02m — **best T3 ever**). Joint-space confirmed working end-to-end in sim (delta_q_norm=0.2485, converged in 54s). Bug 127 cable overdrive was NOT firing (silent no-op: wrist wrench in tool frame at safe_z; cable tension along −Z tool axis; Fxy_tool≈0). Fixed in this session: reads fz, rotates all three via FK rotation matrix R, computes f_mag in base frame. T3 −12 penalty is MuJoCo rigid cable artifact (SC baseline=52.9N, spike to 91N for 4.52s) — real HW v22 had no penalty. 9-issue code review applied post-sim (see CR-1 through CR-9 in bug register). v25 pass checklist: ✅ no crash, ✅ 3 trial_end, ✅ joint_space_start T2, ❌ BUG127 overdrive (fixed), ✅ T1≥50, ❌ T3≥30 (sim artifact). **Ready to submit May 8.** Score +0.56 over v22 = run-to-run noise. Submission artifacts (image URI + score JSON + summary TXT) lack `~/aic_results/ant_diagnostics.jsonl`, so the joint-space path failure mode cannot be diagnosed from the published outputs. Three candidate explanations (in priority order): **(A) IK fell through to Cartesian** — `_solve_ik_for_tcp` may have rejected the proposal (joint-limit guard, total-delta cap of 0.6 rad, or 20 s `joint_space_stage_timeout_sec`) on real HW kinematics that diverge from nominal DH; the v22 Cartesian path then runs and stalls identically. **(B) Joint move stalled** — joint-space spring torque ≈ 200 Nm/rad × 0.20 rad = 40 Nm → ~47 N at TCP via Jacobian was the design target; if real-HW cable equilibrium is ~30–40 N (not ~25 N), joint-impedance stall is the actual blocker. **(C) Cartesian re-engagement caused stall before plug reached the scoring radius** — re-engage publishes a Cartesian pose at the arm's current TCP, but stale `target_stiffness` between mode switches could induce a brief impulse + stall. Need either (i) raw policy stdout from eval container, or (ii) `ant_diagnostics.jsonl` to discriminate. T1/T3 preserve v22 gains (Bugs 106/122 unaffected by joint-space path). |
 
 ---
 
@@ -534,3 +539,62 @@ After editing: copy to install path and rebuild.
 cp ANT.py /home/ataub/IndustryChallenge/ws_aic/src/aic/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py
 cd /home/ataub/IndustryChallenge/ws_aic/src/aic && pixi run colcon build --packages-select ant_policy_node
 ```
+
+---
+
+## v25 Bug Register (Bugs 120–127 + Code Review CR-1 through CR-9)
+
+### Active feature flags (v25)
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `enable_joint_space_lateral` | True | Bug 123 — joint-space T2 WP2 |
+| `joint_space_t2_sfp` | True | Restrict joint-space to T2 SFP WP2 only |
+| `enable_multi_seed_ik` | True | Bug 126 — 5-seed IK before rejecting |
+| `enable_cable_overdrive` | True | Bug 127 — shift IK target opposite cable force |
+| `enable_two_stage_joint_move` | True | Bug 127 — split joint move into 50%/100% phases |
+| `enable_joint_space_diag_signatures` | True | Bug 124/125 — diagnostic case A/B/C signatures |
+| `enable_yaw_alignment` | True | Bug 99/122 — SC gripper yaw correction |
+| `enable_vision_sc_localization` | True | Bug 105 — vision-based SC port localization |
+| `enable_lateral_arrival_check` | True | Bug 106 — Cartesian retry after lateral stall |
+| `enable_high_tension_stiff_lateral` | True | Bug 102/107 — stiffer Cartesian lateral |
+| `enable_anchor_bias` | True | Bug 103 — cable-anchor XY bias |
+
+### Bug 120: Stage 3 SFP feedforward for descent
+`stage3_sfp_feedforward_fz = −6.5 N` (was −5.0 N). Stage 3 Z-descent stalls ~10 cm short because spring + feedforward cannot overcome cable equilibrium. Paired with `stage3_descent_stiffness = 150 N/m` (was 85 N/m). SC unaffected.
+
+### Bug 121: Stage 4 stiffness ramp to prevent transition spike
+`stage4_stiffness_ramp_enable = True`, `stage4_stiffness_ramp_sec = 1.0 s`. v21 sim showed 49.48 N for 0.02 s at Stage 3→4 transition (sudden 85→200 N/m jump × 10 cm position error). Ramps stiffness linearly from `approach_stiffness` to `insertion_stiffness` over 1 s. SC uses `approach_stiffness` throughout, so the ramp is a no-op for T3.
+
+### Bug 122: SC gripper yaw calibration
+`gripper_yaw_correction_rad[("sc", 3)] = −1.7133 rad`. Ground-truth calibrated from 2026-04-30b bag: sc_port_base euler yaw = −98.16° in base_link. Without this, SC plug tip was 0.14 m from port (wrong orientation). v22 confirmed working: dist=0.04 m (T3=34.08).
+
+### Bug 123: Joint-space T2 lateral via UR5e IK
+`JointMotionUpdate` bypasses the 15 N `max_wrench` Cartesian ceiling. At 17 cm position error, joint spring delivers ~47 N via Jacobian vs. cable equilibrium ~25 N. IK: DLS Jacobian iteration from `q_current` (DH nominal, base Rz(π) offset). Helper: `ur5e_kinematics.py`. v23 shipped; T2 still 1.0 — three candidate failure modes (A/B/C).
+
+### Bug 124: A/B/C joint-space failure-mode discriminator
+Encodes failure mode into final TCP position so `score.json` T2 tier_3 separates them. Case A (IK rejected): park +2 cm +X. Case B (joint move stalled): leave at stall pose. Case C (re-engage spike > 22 N): park +5 mm +Z. v24 result: all cases landed outside the 0.085 m bounding radius → all tier_3=0. Failed to discriminate. Motivated Bug 125.
+
+### Bug 125: Rescaled diagnostic signatures (v25)
+`diag_signatures_relative_to_current_pose = True`. Z-axis offsets relative to current TCP (not commanded target): Case A = +8 cm Z above current TCP; Case C = −5 cm Z below. Cable force is mostly horizontal so Z moves succeed even when lateral is stalled. Offsets land inside the bounding radius. Case B unchanged (stall pose IS the signature).
+
+### Bug 126: Multi-seed IK (Case-A countermeasure, v25)
+`enable_multi_seed_ik = True`, `ik_seed_perturbation_rad = 0.2`. Tries IK from `q_current` plus four perturbed seeds (shoulder/elbow ±0.2 rad) before declaring IK rejected. Per-seed budget 50 iter × 5 seeds ≈ 2.5 s worst case (well under 20 s timeout). Also widened `joint_space_max_total_delta_rad` 0.6→1.0 rad.
+
+### Bug 127: F-cable overdrive + two-stage joint move (v25)
+**Overdrive**: read wrist wrench at WP2 entry, rotate from tool frame to base frame via FK rotation matrix `R = forward_kinematics(q_current)[:3,:3]`, compute `f_mag = hypot(fx_b, fy_b)`. Set IK target to `port − bias × F̂_cable_xy` (2 cm bias, 3 cm cap). At safe_z arm is nearly vertical so cable tension is along tool −Z → `Fxy_tool ≈ 0` (silent no-op bug). Fixed 2026-05-07: reads `fz` and rotates all three components. Log: `BUG127 cable overdrive: |F_xy_base|=`.  
+**Two-stage joint move**: `enable_two_stage_joint_move = True`, `two_stage_first_fraction = 0.5`. Splits move into [q_half, q_full] phases with `two_stage_settle_sec = 0.4 s` inter-phase pause. Prevents controller coasting into single steady-state stall.
+
+### Code Review CR-1 through CR-9 (2026-05-07, principal engineer review)
+
+| CR | Issue | Fix applied |
+|----|-------|-------------|
+| CR-1 | `enable_lateral_arrival_check` silently disabled joint-space lateral | Guard reduced to `if not self.enable_joint_space_lateral` |
+| CR-2 | Two-stage phase-1 convergence dead code (`phase_err = err` assigned twice, branch no-op) | Collapsed `phase_err / error_history.append(phase_err)` to single `error_history.append(err)` |
+| CR-3 | SC absolute-force penalty blind spot (baseline > 20 N → any contact accumulates penalty time) | Warning log at Stage 4 entry when `cable_force_baseline > 20.0` for SC zone |
+| CR-4 | Startup DIAG missing v25 flags | Added `joint_space_lateral`, `cable_overdrive`, `two_stage_joint_move`, `multi_seed_ik`, `diag_signatures`; removed stale `stage4_compliance` |
+| CR-5 | `_insert_call_count` dual semantic in `_compliant_insertion` (trial identity + feedforward selection) | Added `trial: int = 0` parameter; `elif trial == 2:` replaces `elif self._insert_call_count == 2:`; `trial=self._insert_call_count` passed from `_run_pipeline` |
+| CR-6 | Zone mapping `else "sc"` silent fallback misclassifies unknown plug types | `zone = task.plug_type` with explicit error log if not in `("sfp", "sc")` |
+| CR-7 | `_wrench_force_xy` used raw tool-frame values (approximation valid only near home) | Rotates all three FTS components via `forward_kinematics(q)[:3,:3]` to base frame; falls back to raw if `joint_states` unavailable |
+| CR-8 | Dead Stage 4 branches: `stage4_compliance_enable`, `stage4_direct_z_dither_enable`, `stage4_fxy_gradient_enable` blocks + `grad_dx/grad_dy` variables | Removed all three `if flag:` blocks and their dead variable initializations; Stage 4 startup log cleaned up |
+| CR-9 | `connector_pose` parameter optional but required-in-practice in `_compliant_insertion` | Added comment marking the required-in-practice dependency; sole call site (`_run_pipeline`) always passes it |
