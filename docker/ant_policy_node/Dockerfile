@@ -6,10 +6,10 @@ FROM docker.io/library/ros:kilted-ros-core AS build
 ARG BUILD_VERSION=unknown
 ENV ANT_BUILD_VERSION=${BUILD_VERSION}
 
-# Install pixi — no version pin needed; lock file is self-contained and
-# the docker-specific pixi.toml/pixi.lock live alongside this Dockerfile.
+# Pin pixi to the version used when the lock was generated to ensure
+# rattler-build produces archives with matching hashes.
 RUN apt update && apt install -y git && \
-    curl -fsSL https://pixi.sh/install.sh | bash
+    curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=0.65.0 bash
 ENV PATH="/root/.pixi/bin:$PATH"
 
 # Add workspace source packages needed at inference time.

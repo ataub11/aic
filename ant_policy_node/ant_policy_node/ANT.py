@@ -257,7 +257,7 @@ class ANT(Policy):
         # cmd_z.  This directly removes the policy's downward push, which
         # is the only contribution we can actually back off (cable tension
         # is uncontrollable).  Smooth proportional ramp → no jerk impulses.
-        self.stage4_force_guard_enable = True
+        self.stage4_force_guard_enable = False  # CR-3: guard fires at normal cable tension (19.5 N < 20.8 N baseline), actively decays ff_z to zero; disabled
         self.stage4_force_guard_threshold_n = 19.5
         self.stage4_force_guard_sustained_sec = 0.3       # how long high |F| sustained
         self.stage4_force_guard_ff_decay_per_sec = 4.0    # N/s reduction in |ff_z|
@@ -319,9 +319,6 @@ class ANT(Policy):
         # (jerk 53.9) when combined with Stage 4 spiral.  Re-enable only
         # with a much lower step rate or sample decimation.
         self.stage4_fxy_gradient_enable = False
-        self.stage4_fxy_threshold_n = 3.0          # below this, Fxy is noise
-        self.stage4_fxy_step_per_sample_m = 0.0006 # 0.6 mm/sample max gradient step
-        self.stage4_fxy_max_offset_m = 0.012       # cap accumulated offset at 12 mm
 
         # ---- Bug 101 (C): Stage 4 per-axis compliance ----------------------
         # Stages 1–3 want stiff position tracking (already use approach_stiff).
@@ -338,8 +335,6 @@ class ANT(Policy):
         # → 0.18m regression).  Re-enable only after raising Z stiffness back
         # toward 200 N/m and re-running sim.
         self.stage4_compliance_enable = False
-        self.stage4_xy_stiffness_n_per_m = 50.0    # gentle XY (was 85–200)
-        self.stage4_z_stiffness_n_per_m  = 120.0   # firm-ish Z
 
         # ---- Bug 102 (J) → Bug 107: stiffer Cartesian lateral --------------
         # True joint-space IK is not available from the policy.  Proxy: when
@@ -615,9 +610,16 @@ class ANT(Policy):
             anchor_bias_m=self.cable_anchor_bias_m,
             arrival_tolerance_m=self.lateral_arrival_tolerance_m,
             arrival_max_retries=self.lateral_arrival_max_retries,
-            stage4_compliance=self.stage4_compliance_enable,
             yaw_alignment=self.enable_yaw_alignment,
             vision_sc=self.enable_vision_sc_localization,
+            joint_space_lateral=self.enable_joint_space_lateral,
+            cable_overdrive=self.enable_cable_overdrive,
+            two_stage_joint_move=self.enable_two_stage_joint_move,
+            multi_seed_ik=self.enable_multi_seed_ik,
+            diag_signatures=self.enable_joint_space_diag_signatures,
+            force_guard_enabled=self.stage4_force_guard_enable,
+            stage4_ff_adaptive=True,
+            stage4_sc_stiffness_n_per_m=self.insertion_stiffness,
         )
 
     # Workspace bounds for probe-point validation in base_link (m).
@@ -1122,8 +1124,7 @@ class ANT(Policy):
             Cartesian mode at the arm's current TCP pose, so the caller can
             continue without a forced mode-switch impulse.
         """
-        if not (self.enable_joint_space_lateral and
-                self.enable_lateral_arrival_check):
+        if not self.enable_joint_space_lateral:
             return None
         tgt_x, tgt_y = target_xy
         obs = get_observation()
@@ -1149,16 +1150,27 @@ class ANT(Policy):
             try:
                 fx = float(obs.wrist_wrench.wrench.force.x)
                 fy = float(obs.wrist_wrench.wrench.force.y)
-                f_mag = math.hypot(fx, fy)
+                fz = float(obs.wrist_wrench.wrench.force.z)
+                # The wrist FTS publishes in tool frame.  At safe_z the arm is
+                # nearly upright, so the cable tension is mostly along tool -Z;
+                # math.hypot(fx, fy) in tool frame ≈ 0 N and the overdrive
+                # never fires.  Rotate all three components to base frame via
+                # the FK rotation matrix (R_base_to_tool0.T = R_tool0_to_base)
+                # so that a downward cable pull contributes to base-frame XY.
+                T_fk = ur5e_kinematics.forward_kinematics(q_current)
+                R = T_fk[:3, :3]   # columns = tool0 axes expressed in base
+                fx_b = float(R[0, 0] * fx + R[0, 1] * fy + R[0, 2] * fz)
+                fy_b = float(R[1, 0] * fx + R[1, 1] * fy + R[1, 2] * fz)
+                f_mag = math.hypot(fx_b, fy_b)
                 if f_mag > 1e-3:
                     # F̂ points in direction cable PULLS the wrist (toward
                     # anchor).  Move target in OPPOSITE direction (push past
                     # port away from anchor).  Bias capped for safety.
                     bias = min(self.cable_overdrive_bias_m,
                                self.cable_overdrive_max_m)
-                    eff_tgt_x = tgt_x - bias * (fx / f_mag)
-                    eff_tgt_y = tgt_y - bias * (fy / f_mag)
-                    cable_dir = (fx / f_mag, fy / f_mag)
+                    eff_tgt_x = tgt_x - bias * (fx_b / f_mag)
+                    eff_tgt_y = tgt_y - bias * (fy_b / f_mag)
+                    cable_dir = (fx_b / f_mag, fy_b / f_mag)
                     self._diag_event(
                         "cable_overdrive",
                         zone=zone, label=label,
@@ -1168,7 +1180,7 @@ class ANT(Policy):
                         eff_tgt_x=eff_tgt_x, eff_tgt_y=eff_tgt_y,
                     )
                     self.get_logger().info(
-                        f"BUG127 cable overdrive: |F_xy|={f_mag:.1f} N "
+                        f"BUG127 cable overdrive: |F_xy_base|={f_mag:.1f} N "
                         f"F̂=({cable_dir[0]:+.2f},{cable_dir[1]:+.2f}) "
                         f"tgt ({tgt_x:.3f},{tgt_y:.3f}) → "
                         f"({eff_tgt_x:.3f},{eff_tgt_y:.3f})"
@@ -1266,13 +1278,7 @@ class ANT(Policy):
                 # Per-phase convergence check uses the phase target's
                 # corresponding TCP — for phase 1 that's halfway between
                 # current and final target, approximately tracked via XY.
-                phase_err = err  # for last phase, identical
-                if len(q_phase_targets) > 1 and phase_idx == 0:
-                    # Halfway TCP target ≈ start_xy + 0.5 * (tgt - start_xy);
-                    # but we don't track start_xy here.  Use a relaxed
-                    # tolerance to advance once phase 1 is "close enough".
-                    phase_err = err  # final-target error suffices
-                error_history.append(phase_err)
+                error_history.append(err)
                 phase_stalled = (
                     iteration >= 5
                     and len(error_history) == stall_window
@@ -1290,12 +1296,28 @@ class ANT(Policy):
                     break
             # Phase boundary settle — gives the joint impedance a fresh
             # error to drive against in phase 2 (Bug 127).
+            _settle_abort = False
             if (phase_idx < len(q_phase_targets) - 1
                     and not self._is_timed_out(start_time, time_limit_sec)):
-                self.sleep_for(self.two_stage_settle_sec)
-            # If we've already arrived under tol, no need to run remaining
-            # phases.
-            if ok:
+                # HR-2: monitor force during settle; abort phase 2 if cable force
+                # spikes (arm at 50% may be at a bad cable-geometry point).
+                _settle_deadline = self.get_clock().now().nanoseconds * 1e-9 + self.two_stage_settle_sec
+                while self.get_clock().now().nanoseconds * 1e-9 < _settle_deadline:
+                    self.sleep_for(0.05)
+                    _obs_settle = get_observation()
+                    if _obs_settle is not None and _obs_settle.wrist_wrench is not None:
+                        _f_settle = abs(float(_obs_settle.wrist_wrench.wrench.force.z))
+                        _abort_threshold = self.cable_force_baseline + 20.0
+                        if _f_settle > _abort_threshold:
+                            self.get_logger().warning(
+                                f"Joint-space lateral settle: force spike {_f_settle:.1f} N "
+                                f"> {_abort_threshold:.1f} N (baseline={self.cable_force_baseline:.1f}) "
+                                f"— aborting phase 2 (HR-2)"
+                            )
+                            _settle_abort = True
+                            break
+            # If we've already arrived under tol, or force-abort fired, stop.
+            if ok or _settle_abort:
                 break
         # Re-engage Cartesian mode at the arm's current TCP pose to avoid a
         # large position-error spring impulse on the next Cartesian move.
@@ -1633,14 +1655,24 @@ class ANT(Policy):
         )
 
     def _wrench_force_xy(self, observation):
-        """Return (Fx, Fy) from the wrist wrench in base_link frame.
+        """Return (Fx, Fy) from the wrist wrench rotated to base_link frame.
 
-        For small TCP rotations from home, the wrist frame's XY is nearly
-        aligned with base_link XY, so we use the raw values.  This is good
-        enough as a gradient signal — sign and rough magnitude — for Bug 100.
+        Rotates all three tool-frame FTS components via the FK rotation matrix
+        so the result is correct regardless of TCP orientation.  Falls back to
+        raw sensor values if joint_states are unavailable (safe for Bug 100
+        which is disabled; required if re-enabled).
         """
         f = observation.wrist_wrench.wrench.force
-        return float(f.x), float(f.y)
+        fx, fy, fz = float(f.x), float(f.y), float(f.z)
+        try:
+            q = ur5e_kinematics.joint_state_to_ordered_array(observation.joint_states)
+            if q is not None:
+                R = ur5e_kinematics.forward_kinematics(q)[:3, :3]
+                return (float(R[0, 0] * fx + R[0, 1] * fy + R[0, 2] * fz),
+                        float(R[1, 0] * fx + R[1, 1] * fy + R[1, 2] * fz))
+        except Exception:
+            pass
+        return fx, fy
 
     def _anchor_bias_xy(self, zone: str, port_x: float, port_y: float):
         """Return a small XY bias (dx, dy) toward the cable anchor for high-
@@ -2626,6 +2658,22 @@ class ANT(Policy):
                 # Timed out — arm stalled short of connector_z under cable load.
                 # Proceed with wherever it stopped; Stage 4 covers the gap.
                 pass
+            # MR-4: guard against arm descending past the commanded Stage 3 target.
+            # check_force=False skips force monitoring, so verify Z explicitly.
+            # Use stage3_z-10mm (not connector_z) as floor — SC target is connector_z+75mm.
+            _obs_s3_floor = get_observation()
+            if _obs_s3_floor is not None and _obs_s3_floor.controller_state is not None:
+                _tcp_z_s3 = _obs_s3_floor.controller_state.tcp_pose.position.z
+                _floor_z = stage3_z - 0.010
+                if _tcp_z_s3 < _floor_z:
+                    self.get_logger().error(
+                        f"Stage 3 ({zone.upper()}): arm below Stage 3 target floor "
+                        f"tcp_z={_tcp_z_s3:.4f} < floor={_floor_z:.4f} "
+                        f"(stage3_z={stage3_z:.4f}); raising SurfaceContactError"
+                    )
+                    raise SurfaceContactError(
+                        f"Stage 3 direct descent: arm below stage3_z-10mm ({_floor_z:.4f})"
+                    )
             obs_direct = get_observation()
             if obs_direct is not None:
                 tcp = obs_direct.controller_state.tcp_pose
@@ -3050,6 +3098,7 @@ class ANT(Policy):
         connector_z: float = None,
         zone: str = "sfp",
         connector_pose=None,
+        trial: int = 0,
     ) -> bool:
         """Compliant insertion: hold arm at connector_z − 5 mm for up to 120 s.
 
@@ -3068,8 +3117,12 @@ class ANT(Policy):
         """
         send_feedback("Stage 4: compliant insertion")
 
-        # SC uses gentler stiffness to avoid overshooting the viable tcp_z zone.
-        stiffness = self.approach_stiffness if zone == "sc" else self.insertion_stiffness
+        # CR-2: use insertion_stiffness (200 N/m) for all zones.
+        # 85 N/m (approach_stiffness) for SC gave only 5.9 N spring at 7 cm stall — well below
+        # the 15 N max_wrench ceiling. 200 N/m gives 14 N, nearly saturating the ceiling.
+        # The "overshoot" concern no longer applies: Stage 3 SC Z-cap at connector_z+0.075
+        # puts the arm in the creep-viable zone where 200 N/m spring ≤ 15 N (no ramp needed).
+        stiffness = self.insertion_stiffness
 
         # Stage 3 returns the actual TCP pose at contact — use that XY/Z.
         start_x = contact_pose.position.x
@@ -3119,6 +3172,18 @@ class ANT(Policy):
         # Bug 67: all trials hold cmd_z = end_z immediately for max spring force from step 1.
         cmd_z = end_z
 
+        # Warn when SC cable baseline already exceeds the 20 N scoring penalty ceiling.
+        # The policy's force-cliff guard can decay ff_z but cannot prevent geometry-driven
+        # transient spikes (MuJoCo rigid cable is worse than real HW; real HW v22 saw no
+        # penalty at baseline ~22 N).  Log so post-hoc analysis can distinguish SC penalty
+        # from an avoidable force event.
+        if zone == "sc" and self.cable_force_baseline > 20.0:
+            self.get_logger().warning(
+                f"Stage 4 (SC): cable_force_baseline={self.cable_force_baseline:.1f} N "
+                "> 20 N — any contact transient accumulates penalty time; "
+                "force-cliff guard active but geometry spikes are uncontrollable"
+            )
+
         # SFP: spring force (200 N/m) is capped at max_wrench=15 N, which exactly
         # balances the SFP cable upward equilibrium force at ~0.18–0.23 m.
         # A feedforward adds constant downward force outside the max_wrench cap.
@@ -3139,11 +3204,33 @@ class ANT(Policy):
         # height the spring force is only 13 N and the extra push is
         # needed; force-cliff guard (Bug 110 v2) decays it if needed.
         if zone == "sc":
-            stage4_feedforward_fz = -3.0
-        elif self._insert_call_count == 2:   # T2: SFP at -45° yaw, higher cable tension
-            stage4_feedforward_fz = -9.0
+            _ff_base = -3.0
+            _ff_cap = -9.0   # SC: spring=14 N at 7 cm + ff=-9 → 23 N total (above 15 N cap, still useful at shallower stalls)
+        elif trial == 2:   # T2: SFP at -45° yaw, higher cable tension
+            _ff_base = -9.0
+            _ff_cap = -12.0  # T2 SFP: avoid force abort at very high baselines
         else:
-            stage4_feedforward_fz = -3.0
+            _ff_base = -3.0
+            _ff_cap = -9.0
+        # CR-1+HR-1: scale feedforward with cable baseline above the high-tension
+        # threshold. At SC real-HW baseline ~52.9 N vs threshold 19 N:
+        #   excess = 33.9 N, scale = 1 + min(2, 33.9/10) = 3.0×
+        #   ff = max(-9, -3 × 3) = -9 N, total spring+ff = 14+9 = 23 N > 15 N cap
+        # This is still capped at max_wrench=15 N, but any headroom below the cap
+        # (shallow stall heights) benefits from the scaled feedforward.
+        if self.cable_force_baseline > self.high_tension_baseline_threshold_n:
+            _excess = self.cable_force_baseline - self.high_tension_baseline_threshold_n
+            _ff_scale = 1.0 + min(2.0, _excess / 10.0)
+            _ff_scaled = max(_ff_cap, _ff_base * _ff_scale)
+            self.get_logger().info(
+                f"Stage 4 ({zone.upper()}): baseline={self.cable_force_baseline:.1f} N "
+                f"> threshold={self.high_tension_baseline_threshold_n:.1f} N; "
+                f"ff_z scaled {_ff_base:.1f} N × {_ff_scale:.2f} = {_ff_scaled:.1f} N "
+                f"(cap={_ff_cap:.1f} N)"
+            )
+            stage4_feedforward_fz = _ff_scaled
+        else:
+            stage4_feedforward_fz = _ff_base
 
         self.get_logger().info(
             f"Stage 4: holding cmd_z={end_z:.4f} (connector_z-5mm), "
@@ -3169,8 +3256,6 @@ class ANT(Policy):
         slack_threshold = self.cable_force_baseline - self.stage4_slack_drop_n
         slack_start_t = None         # wall-clock when |F| first dipped below threshold
         spiral_logged = False
-        # Bug 100 (B): accumulated Fxy-gradient XY offset (capped).
-        grad_dx, grad_dy = 0.0, 0.0
         # Bug 104 (I): per-orbit z-descent counter for 'descend' mode.
         orbits_completed = 0.0
         descend_z_offset = 0.0
@@ -3180,15 +3265,13 @@ class ANT(Policy):
         force_guard_last_sample_t = None
         force_guard_logged = False
         self.get_logger().info(
-            f"Stage 4: active-insertion enabled (Bug 98+100+101+104) — "
+            f"Stage 4: active-insertion (Bug 98+104) — "
             f"mode={stage4_mode} xy_err={xy_err*1000:.1f}mm "
-            f"baseline={self.cable_force_baseline:.2f} N, "
-            f"slack< {slack_threshold:.2f} N for {self.stage4_slack_sustained_sec:.1f} s exits early; "
-            f"after {self.stage4_settle_sec:.0f} s settle, spiral up to "
-            f"±{self.stage4_spiral_max_radius_m*1000:.0f} mm "
-            f"(period {self.stage4_spiral_period_sec:.0f} s); "
-            f"Fxy_grad={'on' if self.stage4_fxy_gradient_enable else 'off'} "
-            f"compliance={'per-axis' if self.stage4_compliance_enable else 'isotropic'}"
+            f"baseline={self.cable_force_baseline:.2f} N "
+            f"slack<{slack_threshold:.2f} N for {self.stage4_slack_sustained_sec:.1f}s exits early; "
+            f"after {self.stage4_settle_sec:.0f}s settle, spiral "
+            f"±{self.stage4_spiral_max_radius_m*1000:.0f}mm "
+            f"(period {self.stage4_spiral_period_sec:.0f}s)"
         )
 
         while True:
@@ -3246,29 +3329,14 @@ class ANT(Policy):
                 # As insertion proceeds we drift cmd_z toward end_z.  Once
                 # cmd_z_now == end_z, behaves like 'spiral' mode.
 
-            # Bug 111: in 'direct' mode the chamfer reaction can't pull the
-            # plug if cmd_z is held perfectly static.  After settle, oscillate
-            # cmd_z by ±dither_amp around the target so the plug rotates past
-            # micro-features.  Keeps mean cmd_z = end_z so steady spring force
-            # is unchanged; only the instantaneous command moves.
-            if (
-                self.stage4_direct_z_dither_enable
-                and stage4_mode == "direct"
-                and elapsed_stage > self.stage4_settle_sec
-            ):
-                amp = self.stage4_direct_z_dither_amp_m
-                period = max(0.001, self.stage4_direct_z_dither_period_sec)
-                phase = 2.0 * np.pi * (elapsed_stage - self.stage4_settle_sec) / period
-                cmd_z_now = cmd_z_now + amp * np.sin(phase)
-
             # Bug 110 v2: smooth feedforward_fz decay (computed below after
             # we read |F|; here we apply the current factor so the motion
             # update sees a continuous wrench).
             ff_z_now = stage4_feedforward_fz * force_guard_ff_factor
 
             target_pose = self._make_pose(
-                start_x + spiral_dx + grad_dx,
-                start_y + spiral_dy + grad_dy,
+                start_x + spiral_dx,
+                start_y + spiral_dy,
                 cmd_z_now,
                 contact_pose.orientation,
             )
@@ -3289,23 +3357,9 @@ class ANT(Policy):
                 )
             else:
                 stiffness_now = stiffness
-            if self.stage4_compliance_enable:
-                # Bug 101 (C): low XY stiffness so chamfer can guide plug;
-                # modest Z stiffness keeps a controllable spring force.
-                sx = self.stage4_xy_stiffness_n_per_m
-                sz = self.stage4_z_stiffness_n_per_m
-                motion_update = self._build_motion_update_axis(
-                    target_pose,
-                    stiffness_xyz=(sx, sx, sz),
-                    rot_stiffness=(sx * 0.5, sx * 0.5, sx * 0.5),
-                    damping_xyz=(sx * 0.6, sx * 0.6, sz * 0.6),
-                    rot_damping=(sx * 0.3, sx * 0.3, sx * 0.3),
-                    feedforward_fz=ff_z_now,
-                )
-            else:
-                motion_update = self._build_motion_update(
-                    target_pose, stiffness_now, feedforward_fz=ff_z_now
-                )
+            motion_update = self._build_motion_update(
+                target_pose, stiffness_now, feedforward_fz=ff_z_now
+            )
             try:
                 move_robot(motion_update=motion_update)
             except Exception as ex:
@@ -3320,42 +3374,14 @@ class ANT(Policy):
             pos_error = np.linalg.norm(obs.controller_state.tcp_error[:3])
             tcp_z = obs.controller_state.tcp_pose.position.z
 
-            # Bug 100 (B): integrate Fxy gradient.  Step against the lateral
-            # reaction.  Note Fxy is in the wrist frame, but for small TCP-down
-            # rotations from home, wrist XY ≈ base_link XY for sign/magnitude
-            # purposes (good enough as a search cue).  Sign flip: a *positive*
-            # Fx means the chamfer pushes the wrist in +x → step the command
-            # in −x to seek the centre.
-            if (
-                self.stage4_fxy_gradient_enable
-                and stage4_mode != "direct"
-                and elapsed_stage > self.stage4_settle_sec
-            ):
-                fx, fy = self._wrench_force_xy(obs)
-                fxy_mag = math.hypot(fx, fy)
-                if fxy_mag > self.stage4_fxy_threshold_n:
-                    step = self.stage4_fxy_step_per_sample_m
-                    grad_dx -= step * (fx / fxy_mag)
-                    grad_dy -= step * (fy / fxy_mag)
-                    # Cap accumulated offset.
-                    cap = self.stage4_fxy_max_offset_m
-                    grad_norm = math.hypot(grad_dx, grad_dy)
-                    if grad_norm > cap:
-                        grad_dx *= cap / grad_norm
-                        grad_dy *= cap / grad_norm
-
             spiral_tag = (
                 f" spiral=({spiral_dx*1000:+.1f},{spiral_dy*1000:+.1f})mm"
                 if spiraling else ""
             )
-            grad_tag = (
-                f" grad=({grad_dx*1000:+.1f},{grad_dy*1000:+.1f})mm"
-                if (grad_dx != 0.0 or grad_dy != 0.0) else ""
-            )
             self.get_logger().info(
                 f"Stage 4 [{stage4_mode}]: cmd_z={cmd_z_now:.4f} tcp_z={tcp_z:.4f} "
                 f"pos_error={pos_error:.4f} m  |F|={force_abs:.2f} N"
-                f"{spiral_tag}{grad_tag}"
+                f"{spiral_tag}"
             )
 
             # Bug 110 v2: smooth feedforward_fz decay when |F| sustained
@@ -3577,7 +3603,11 @@ class ANT(Policy):
                 start_time, time_limit_sec,
                 baseline_settle_sec=baseline_settle_sec,
             )
-            zone = "sfp" if task.plug_type == "sfp" else "sc"
+            zone = task.plug_type  # "sfp" or "sc"
+            if zone not in ("sfp", "sc"):
+                self.get_logger().error(
+                    f"Unknown plug_type={zone!r} — pipeline may behave incorrectly"
+                )
             self._approach_connector(
                 connector_pose, get_observation, move_robot, send_feedback,
                 start_time, time_limit_sec,
@@ -3594,6 +3624,7 @@ class ANT(Policy):
                 connector_z=self.connector_z_in_base[zone],
                 zone=zone,
                 connector_pose=connector_pose,
+                trial=self._insert_call_count,
             )
 
         try:
