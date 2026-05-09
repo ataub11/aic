@@ -10,6 +10,39 @@ This is the operational plan for the remaining May 9–15 submission slots
 following the v25 regression (23.03 vs v22–v24's ~65). Co-authored by Lead A
 (ANT campaign) and Lead B (external review). **Supersedes all prior plans.**
 
+### Timezone semantics (read first — burned us on Day 1)
+- **Submission window is UTC-daily.** AIC portal accepts at most one
+  submission per UTC day. v25 was submitted at 16:05 PST (= 23:05 UTC) on
+  PST 2026-05-08, which consumed the UTC-2026-05-08 slot.
+- **Engineers work PST.** A PST evening build (e.g. 19:23 PST 2026-05-08)
+  lands in the *next* UTC day's slot (UTC 2026-05-09). This is fine — but
+  every submission's "slot" must be tracked by UTC, not by the PST date
+  the engineer thinks of as "today."
+- **The submission deadline each day is PST 16:59 (= UTC 23:59).** Any
+  later and the slot rolls over and we lose a day. The plan's "by 14:00"
+  targets are PST and exist as a 3-hour safety margin against portal
+  flakiness; they are NOT the hard deadline.
+- **May 15 cutoff is UTC midnight 2026-05-15 → 23:59 UTC** (= PST May 14
+  17:00 → PST May 15 16:59). v32 must re-tag the v31 image during this
+  window. v31 must register during UTC May 14 (= PST May 13 17:00 → PST
+  May 14 16:59).
+- **`submit.sh` and postmortem-discipline directory naming use UTC date**
+  for filesystem paths. This means PST-evening builds will create
+  directories tagged with the *next* PST calendar day. That's intentional
+  — the directory date matches the submission slot.
+
+### Slot ↔ UTC date map (authoritative)
+| Tag | UTC slot | PST work window |
+|---|---|---|
+| v25 (already submitted) | UTC 2026-05-08 | PST 2026-05-07 17:00 → 2026-05-08 16:59 |
+| v26 (in flight as of writing) | UTC 2026-05-09 | PST 2026-05-08 17:00 → 2026-05-09 16:59 |
+| v27 | UTC 2026-05-10 | PST 2026-05-09 17:00 → 2026-05-10 16:59 |
+| v28 | UTC 2026-05-11 | PST 2026-05-10 17:00 → 2026-05-11 16:59 |
+| v29 | UTC 2026-05-12 | PST 2026-05-11 17:00 → 2026-05-12 16:59 |
+| v30 | UTC 2026-05-13 | PST 2026-05-12 17:00 → 2026-05-13 16:59 |
+| v31 (RC) | UTC 2026-05-14 | PST 2026-05-13 17:00 → 2026-05-14 16:59 |
+| v32 (final, re-tag of v31) | UTC 2026-05-15 | PST 2026-05-14 17:00 → 2026-05-15 16:59 |
+
 ### Guiding principles
 1. Every submission produces information. A 23 with no diagnostic readout is
    worse than a 60 with one.
@@ -40,6 +73,23 @@ following the v25 regression (23.03 vs v22–v24's ~65). Co-authored by Lead A
 - **C — Process & infra.** Eng-5 part-time, Eng-1 backup.
 
 Eng-2 also runs the **independent image audit** for every submission.
+
+### Pairing rule (post-Day-1 reinforcement, 2026-05-09 evening)
+Day-1 of this campaign violated pairing — a single human + Claude
+co-author drove both submission AND review.  This is forbidden going
+forward:
+
+- **Driver and reviewer must be different humans.**  Claude can co-pilot
+  either role but does not count as the second human.
+- The reviewer signs the `pre_submit_checklist.md` "Reviewer
+  (independent)" line by name and commits before `submit.sh` runs.
+- `submit.sh` does not currently enforce the named-reviewer rule
+  programmatically (the checklist line is informational).  If Day-2
+  also slips on this, we add a parser check that requires the line to
+  contain a non-empty name distinct from the driver.
+- Solo-build is permitted only with a Lead-signed waiver, recorded in
+  the checklist with reason.  Two waivers in a row trigger a stop-work
+  conversation between Lead A and Lead B before the third slot.
 
 ### Day-by-day schedule (compressed: May 8 prep collapsed into May 9 morning)
 

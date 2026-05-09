@@ -42,17 +42,29 @@ DOCKER_COMPOSE_FILE="docker/docker-compose.yaml"
 # ── Argument parsing ────────────────────────────────────────────────────────────
 TAG="${1:-}"
 SKIP_VERIFY=false
+WAIVE_CHECKLIST=false  # Lead-signed override, do NOT use for routine builds
 for arg in "$@"; do
   [[ "$arg" == "--skip-verify" ]] && SKIP_VERIFY=true
+  [[ "$arg" == "--waive-checklist-lead-signed" ]] && WAIVE_CHECKLIST=true
 done
 
 if [[ -z "$TAG" ]]; then
-  echo "Error: version tag required. Usage: ./submit.sh <tag> [--skip-verify]"
+  echo "Error: version tag required."
+  echo "Usage: ./submit.sh <tag> [--skip-verify] [--waive-checklist-lead-signed]"
   exit 1
 fi
 
 LOCAL_TAGGED="${LOCAL_IMAGE}:${TAG}"
 REMOTE_IMAGE="${ECR_REGISTRY}/aic-team/${TEAM_NAME}:${TAG}"
+
+# ── UTC-slot computation (timezone semantics from CLAUDE.md) ──────────────────
+# All filesystem paths use UTC date so the "submission slot" matches the
+# directory date even when the engineer builds in a PST evening.
+UTC_DATE=$(date -u +%Y-%m-%d)
+PST_NOW=$(TZ=America/Los_Angeles date +"%Y-%m-%d %H:%M %Z")
+echo "UTC submission slot: ${UTC_DATE}    (PST clock: ${PST_NOW})"
+SLOT_DIR="ant_policy_node/sim_runs/run_${UTC_DATE}_${TAG}_postmortem"
+EVIDENCE_DIR="ant_policy_node/sim_runs/submit_evidence_${TAG}"
 
 # ── Postmortem discipline: check previous slot's postmortem is filled ─────────
 # submit.sh for slot N checks that slot N-1's postmortem was completed.
@@ -72,7 +84,7 @@ if [[ -n "$PREV_POSTMORTEM" ]]; then
 fi
 
 # Create this slot's postmortem template now so it exists before push.
-THIS_POSTMORTEM="ant_policy_node/sim_runs/run_$(date -u +%Y-%m-%d)_${TAG}_postmortem/postmortem_${TAG}.md"
+THIS_POSTMORTEM="${SLOT_DIR}/postmortem_${TAG}.md"
 if [[ ! -f "$THIS_POSTMORTEM" ]]; then
   mkdir -p "$(dirname "$THIS_POSTMORTEM")"
   cat > "$THIS_POSTMORTEM" <<POSTMORTEM_TEMPLATE
@@ -93,6 +105,105 @@ POSTMORTEM_TEMPLATE
   echo "✓ Postmortem template created: $THIS_POSTMORTEM"
 fi
 
+# ── v27+ : pre-submit checklist parser (Workstream A/B mechanical gate) ──────
+# Reads `pre_submit_checklist.md` at repo root.  Each gate line starts with
+# `- [ ]` (unchecked), `- [x]` (passed), or `- [w] ... reason: <text>`
+# (waived with non-empty reason).  Refuses push if any required gate is
+# unchecked or waived without a reason.
+#
+# Section starting with `## Required gates` to first `## ` after it bounds
+# the gate set; lines outside this section are commentary and ignored.
+#
+# Engineers can pass `--waive-checklist-lead-signed` to bypass entirely
+# (lead-signed override, used by Lead A or Lead B in genuine emergencies).
+# That flag is captured in evidence so the override is auditable.
+CHECKLIST_FILE="pre_submit_checklist.md"
+echo ""
+echo "=== Pre-submit checklist parse (${CHECKLIST_FILE}) ==="
+mkdir -p "${EVIDENCE_DIR}"
+CHECKLIST_STATE="${EVIDENCE_DIR}/checklist_state.txt"
+{
+  echo "tag=${TAG}"
+  echo "utc_slot=${UTC_DATE}"
+  echo "pst_clock=${PST_NOW}"
+  echo "waive_checklist=${WAIVE_CHECKLIST}"
+  echo "---"
+} > "$CHECKLIST_STATE"
+
+if $WAIVE_CHECKLIST; then
+  echo "⚠ --waive-checklist-lead-signed passed; checklist parse SKIPPED."
+  echo "  This override is logged to ${CHECKLIST_STATE}."
+  echo "checklist_skipped=true (lead-signed waiver)" >> "$CHECKLIST_STATE"
+elif [[ ! -f "$CHECKLIST_FILE" ]]; then
+  echo "✗ FATAL: ${CHECKLIST_FILE} missing. Cannot enforce pre-submit gates."
+  echo "  Restore the file or pass --waive-checklist-lead-signed (auditable)."
+  exit 1
+else
+  python3 - "$CHECKLIST_FILE" "$CHECKLIST_STATE" <<'PYCHECK'
+import re, sys
+src = open(sys.argv[1]).read()
+state_path = sys.argv[2]
+in_section = False
+errors, waivers, passes = [], [], []
+two_critical_waived = []  # A0 + T3 waived together = v25 anti-pattern
+for raw in src.splitlines():
+    line = raw.rstrip()
+    if line.startswith("## Required gates"):
+        in_section = True
+        continue
+    if in_section and line.startswith("## "):
+        in_section = False
+    if not in_section:
+        continue
+    m = re.match(r"^- \[( |x|w)\]\s+(.*)$", line)
+    if not m:
+        continue
+    state, label = m.group(1), m.group(2).strip()
+    short = label.split(".")[0][:80]
+    if state == " ":
+        errors.append(f"UNCHECKED: {short}")
+    elif state == "w":
+        # Look ahead for "reason:" on subsequent indented lines.  We
+        # already consumed the label line; scan the original source for
+        # the "reason:" token belonging to this waiver block.
+        reason_match = re.search(
+            r"^- \[w\]\s+" + re.escape(label) + r".*?(?=^- \[|^## )",
+            src, re.MULTILINE | re.DOTALL,
+        )
+        block = reason_match.group(0) if reason_match else label
+        rm = re.search(r"reason:\s*(\S.*)", block)
+        if not rm or not rm.group(1).strip():
+            errors.append(f"WAIVED w/o REASON: {short}")
+        else:
+            waivers.append(f"WAIVED: {short} | {rm.group(1).strip()[:160]}")
+            if "A0" in label:
+                two_critical_waived.append("A0")
+            if "T3 wall-clock" in label:
+                two_critical_waived.append("T3")
+    else:
+        passes.append(f"PASSED: {short}")
+
+with open(state_path, "a") as f:
+    for p in passes:  f.write(p + "\n")
+    for w in waivers: f.write(w + "\n")
+    for e in errors:  f.write(e + "\n")
+
+if errors:
+    print("✗ FATAL — required gate(s) failing:")
+    for e in errors: print("  " + e)
+    sys.exit(1)
+# v25 anti-pattern check: cannot waive A0 AND T3 in the same submission.
+if "A0" in two_critical_waived and "T3" in two_critical_waived:
+    print("✗ FATAL — both A0 and T3 wall-clock are waived in the same slot.")
+    print("  This is the v25 anti-pattern (zero runtime validation).")
+    print("  Fix: run one of A0 or local sim, OR pass")
+    print("       --waive-checklist-lead-signed (Lead A or Lead B only).")
+    sys.exit(1)
+print(f"✓ Checklist OK: {len(passes)} passed, {len(waivers)} waived")
+for w in waivers: print("  " + w)
+PYCHECK
+fi
+
 # ── v26 / A4: pre-build unit tests (Workstream A acceptance gate) ────────────
 # Tests run on the build host (no ROS imports needed for the green path).
 # A failure here means a v26 helper regressed; the build is aborted before
@@ -106,34 +217,51 @@ else
   exit 1
 fi
 
-# ── v26 / Workstream C2: T3 wall-clock gate from prior local sim ─────────────
-# If a recent local sim's policy.log is available (from `scripts/local_sim.sh`
-# or equivalent), grep the trial=3 trial_end event for `duration_sec=` and
-# refuse the push if T3 timed out.  The gate is SOFT: when no log is found
-# (e.g. first build of the day), it warns but does not block.  This way the
-# gate adds value when a sim has been run, but doesn't block fresh hosts.
+# ── Workstream C2: T3 wall-clock gate (HARD as of v27) ───────────────────────
+# Reads the most recent local sim's policy.log, greps trial=3 trial_end for
+# `duration_sec=`, and refuses push if T3 ≥ 110 s OR if no policy.log is
+# present (zero-runtime-validation = v25 anti-pattern).
+#
+# Day-1 (v26) was permitted to skip this with a Lead-signed waiver in
+# pre_submit_checklist.md.  v27 onward, missing log = FATAL unless waived.
+# The checklist parser above also enforces the "T3 waived ⇒ reason required"
+# contract; this block enforces the runtime check itself.
 T3_LOG_PATH="${T3_LOG_PATH:-/tmp/ant_local_sim/policy.log}"
 echo ""
-echo "=== Pre-build: T3 wall-clock gate (Workstream C) ==="
-if [[ -f "$T3_LOG_PATH" ]]; then
+echo "=== Pre-build: T3 wall-clock gate (Workstream C, HARD) ==="
+# Detect whether this gate was waived in the checklist (parser already
+# bailed if waiver lacked a reason; here we just read the state file).
+T3_WAIVED=false
+if [[ -f "$CHECKLIST_STATE" ]]; then
+  if grep -qE '^WAIVED: T3 wall-clock' "$CHECKLIST_STATE"; then
+    T3_WAIVED=true
+  fi
+fi
+if $WAIVE_CHECKLIST || $T3_WAIVED; then
+  echo "⚠ T3 wall-clock gate WAIVED for this slot."
+  echo "  Reason captured in ${CHECKLIST_STATE}."
+elif [[ -f "$T3_LOG_PATH" ]]; then
   T3_DUR=$(grep "ANT-DIAG event=trial_end trial=3" "$T3_LOG_PATH" 2>/dev/null \
            | grep -oE 'duration_sec=[0-9.]+' | head -1 \
            | awk -F= '{print $2}')
   if [[ -z "$T3_DUR" ]]; then
-    echo "⚠ T3 wall-clock gate: no trial=3 trial_end found in $T3_LOG_PATH"
-    echo "  (run a local sim before submitting to enable this gate)"
-  else
-    # bash-only float compare (no bc dependency)
-    if awk "BEGIN{exit !($T3_DUR > 110)}"; then
-      echo "✗ FATAL: T3 wall-clock $T3_DUR s > 110 s threshold."
-      echo "  v25-class regression detected in local sim.  Aborting push."
-      exit 1
-    fi
-    echo "✓ T3 wall-clock $T3_DUR s ≤ 110 s"
+    echo "✗ FATAL: T3 wall-clock gate: no trial=3 trial_end in $T3_LOG_PATH."
+    echo "  Either run a local sim that completes T3 OR mark the T3 line"
+    echo "  in pre_submit_checklist.md as [w] with a reason."
+    exit 1
   fi
+  if awk "BEGIN{exit !($T3_DUR > 110)}"; then
+    echo "✗ FATAL: T3 wall-clock $T3_DUR s > 110 s threshold."
+    echo "  v25-class regression detected in local sim.  Aborting push."
+    exit 1
+  fi
+  echo "✓ T3 wall-clock $T3_DUR s ≤ 110 s"
 else
-  echo "⚠ T3 wall-clock gate: $T3_LOG_PATH not found — gate skipped."
-  echo "  Set T3_LOG_PATH to your local sim's policy.log to enable."
+  echo "✗ FATAL: T3 wall-clock gate: $T3_LOG_PATH not found."
+  echo "  Run a local sim before submitting OR mark the T3 line in"
+  echo "  pre_submit_checklist.md as [w] with a reason."
+  echo "  (Set T3_LOG_PATH env var to point at a non-default log.)"
+  exit 1
 fi
 
 # ── Step 1: Build the image ────────────────────────────────────────────────────
@@ -145,8 +273,10 @@ sed -i "s|image: ant-policy:.*|image: ${LOCAL_TAGGED}|" "$DOCKER_COMPOSE_FILE"
 # uncommitted changes) as BUILD_VERSION; ANT.py logs it on startup so every
 # eval log identifies the exact code that shipped.
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_DIRTY=false
 if [[ "$GIT_SHA" != "unknown" ]] && ! git diff --quiet HEAD 2>/dev/null; then
   GIT_SHA="${GIT_SHA}-dirty"
+  GIT_DIRTY=true
 fi
 if [[ "$GIT_SHA" == "unknown" ]]; then
   echo "Error: git rev-parse failed — refusing to ship a build_version=unknown image."
@@ -155,6 +285,34 @@ if [[ "$GIT_SHA" == "unknown" ]]; then
 fi
 export BUILD_VERSION="${TAG}-${GIT_SHA}"
 echo "BUILD_VERSION=${BUILD_VERSION}"
+
+# Forensic-debt mitigation (Lead B Day-1 review): when BUILD_VERSION ends
+# in -dirty, capture the working-tree diff into the evidence dir so future
+# auditors don't have to reconstruct what "dirty" meant at build time.
+if $GIT_DIRTY; then
+  mkdir -p "${EVIDENCE_DIR}"
+  WT_DIFF="${EVIDENCE_DIR}/working_tree.diff"
+  {
+    echo "# working_tree.diff for ${BUILD_VERSION}"
+    echo "# captured $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# git rev-parse HEAD: $(git rev-parse HEAD)"
+    echo "# git status (short):"
+    git status --short
+    echo "# --- diff vs HEAD ---"
+    git diff HEAD
+  } > "$WT_DIFF"
+  echo "✓ Captured working tree diff: ${WT_DIFF}"
+  # Refuse the build if the dirty bits include policy code — only allow
+  # dirty for non-policy paths (submit.sh, docs, test infra).  Touching
+  # ANT.py or ur5e_kinematics.py without committing is the v25 process
+  # gap and must commit before push.
+  if git diff --name-only HEAD | grep -qE '^ant_policy_node/(ant_policy_node|install)/.*\.py$'; then
+    echo "✗ FATAL: dirty working tree includes ANT.py / ur5e_kinematics.py."
+    echo "  Commit policy code changes before building (forensic integrity)."
+    git diff --name-only HEAD | grep -E '^ant_policy_node/' | sed 's/^/    /'
+    exit 1
+  fi
+fi
 
 # ── Pre-build: Sync stale install/ directory (Bug 90 gotcha) ─────────────────
 echo ""
@@ -300,15 +458,23 @@ if [[ -z "$IK_FILES" ]]; then
   FAIL=1
 fi
 
-# ── Marker checks ─────────────────────────────────────────────────────────────
+# ── Marker checks (Eng-2 Day-1 review item: count-based, not binary) ──────────
 # Note: `-e "$m"` is REQUIRED — markers can start with `-` (e.g. -1.7133),
 # and without `-e`/`--` grep parses leading-dash markers as flags
 # (`-1.7133` → `-1` context-lines + pattern `.7133`), silently checking
 # the wrong thing.  This caused every -1.7133 check since Bug 122 to lie.
+#
+# v27+: switched from `grep -qF` (binary) to `grep -cF` (count) so we can
+# detect "feature was supposed to fire 3 times, only fires once" class
+# bugs.  PRESENT = count >= 1; ABSENT = count == 0.  The output now
+# includes the count, making the verify_output.txt artifact richer for
+# post-mortem analysis (e.g. v25 had `_ff_scale` 6× indicating the v25
+# code added MORE instances on top of v24's existing one).
 for f in $ANT_FILES; do
   for m in "${ANT_MARKERS[@]}"; do
-    if grep -qF -e "$m" "$f" 2>/dev/null; then
-      echo "✓ ANT.py [$f]: $m"
+    n=$(grep -cF -e "$m" "$f" 2>/dev/null || echo 0)
+    if (( n >= 1 )); then
+      echo "✓ ANT.py [$f]: $m (n=$n)"
     else
       echo "✗ MISSING: ANT.py [$f] lacks marker: $m"
       FAIL=1
@@ -319,19 +485,21 @@ for f in $ANT_FILES; do
   # is the second half of "every change is flag-gated, default-off, sim-
   # validated" — a v26 image that still contains v25 code paths is not v26.
   for am in "${ANT_ANTI_MARKERS[@]}"; do
-    if grep -qF -e "$am" "$f" 2>/dev/null; then
-      echo "✗ ANTI-MARKER present in ANT.py [$f]: $am  (v25 code leaked through revert)"
-      FAIL=1
+    n=$(grep -cF -e "$am" "$f" 2>/dev/null || echo 0)
+    if (( n == 0 )); then
+      echo "✓ anti-marker absent ANT.py [$f]: $am (n=0)"
     else
-      echo "✓ anti-marker absent ANT.py [$f]: $am"
+      echo "✗ ANTI-MARKER present in ANT.py [$f]: $am (n=$n)  (v25 code leaked through revert)"
+      FAIL=1
     fi
   done
 done
 
 for f in $IK_FILES; do
   for m in "${IK_MARKERS[@]}"; do
-    if grep -qF -e "$m" "$f" 2>/dev/null; then
-      echo "✓ ur5e_kinematics.py [$f]: $m"
+    n=$(grep -cF -e "$m" "$f" 2>/dev/null || echo 0)
+    if (( n >= 1 )); then
+      echo "✓ ur5e_kinematics.py [$f]: $m (n=$n)"
     else
       echo "✗ MISSING: ur5e_kinematics.py [$f] lacks marker: $m"
       FAIL=1
