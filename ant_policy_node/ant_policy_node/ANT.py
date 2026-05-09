@@ -19,6 +19,7 @@ import collections
 import json
 import math
 import os
+import time
 
 import cv2
 import numpy as np
@@ -799,16 +800,18 @@ class ANT(Policy):
             except (TypeError, ValueError):
                 record[k] = str(v)
         try:
-            os.makedirs(os.path.dirname(self._hw_variance_log_path), exist_ok=True)
+            dirname = os.path.dirname(self._hw_variance_log_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
             with open(self._hw_variance_log_path, "a") as f:
                 f.write(json.dumps(record) + "\n")
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError: makedirs("") on bare-filename path; OSError: I/O
             pass
 
     def _trial_budget_begin(self, time_limit_sec: float) -> None:
         """Mark the start of a trial for wall-clock budget accounting."""
-        import time as _time
-        self._trial_start_monotonic = _time.monotonic()
+        self._trial_start_monotonic = time.monotonic()
         self._trial_time_limit_sec = float(time_limit_sec)
 
     def _remaining_trial_budget_sec(self) -> float:
@@ -821,9 +824,19 @@ class ANT(Policy):
         """
         if self._trial_start_monotonic is None:
             return float("inf")
-        import time as _time
-        elapsed = _time.monotonic() - self._trial_start_monotonic
+        elapsed = time.monotonic() - self._trial_start_monotonic
         return max(0.0, self._trial_time_limit_sec - elapsed)
+
+    def _elapsed_trial_sec(self) -> float:
+        """Return wall-clock seconds since `_trial_budget_begin` was called.
+
+        Used by `trial_end` diag events so submit.sh can grep
+        `duration=<n>` and refuse to ship if T3 hits the timeout band.
+        Returns 0.0 if the budget wasn't started (defensive default).
+        """
+        if self._trial_start_monotonic is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._trial_start_monotonic)
 
     # ----------------------------------------------------------------------
     # Bug 106 — lateral arrival-check + retry
@@ -1165,21 +1178,25 @@ class ANT(Policy):
             Cartesian mode at the arm's current TCP pose, so the caller can
             continue without a forced mode-switch impulse.
         """
-        if not (self.enable_joint_space_lateral and
-                self.enable_lateral_arrival_check):
-            return None
         # v26 defense-in-depth (Workstream A guard): joint-space lateral is
-        # T2-SFP-only by design.  A future caller drift that invokes this
-        # helper from T1 or T3 must fail closed (None ⇒ Cartesian fallback)
-        # and surface as a C1-encodable diag event.  T1/T3 have neither the
-        # cable-equilibrium problem nor the calibrated geometry assumptions
-        # this helper makes.
+        # SFP-only.  v26 keeps the v22 T2 SFP wiring; v27 (Eng-3) will add
+        # T1 SFP behind a separate flag.  Non-SFP callers must fail closed
+        # (None ⇒ Cartesian fallback) and surface as a C1-encodable diag
+        # event.  T3 SC has neither the cable-equilibrium problem nor the
+        # calibrated geometry assumptions this helper makes.
+        #
+        # NOTE: this guard runs FIRST so it cannot be bypassed by future
+        # toggles of `enable_lateral_arrival_check` or
+        # `enable_joint_space_lateral` (Eng-3/Eng-4 feedback on b078aee).
         if zone != "sfp":
             self._diag_event(
                 "joint_space_guard_violation",
                 zone=zone, label=label, reason="non_sfp_zone",
             )
-            self._c1_failure_code_pending = "guard_violation"
+            self._c1_record_failure("guard_violation")
+            return None
+        if not (self.enable_joint_space_lateral and
+                self.enable_lateral_arrival_check):
             return None
         tgt_x, tgt_y = target_xy
         obs = get_observation()
@@ -3602,6 +3619,7 @@ class ANT(Policy):
             self._diag_event(
                 "trial_end", success=True, reason="diag_signature",
                 diag_case=e.case,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
             )
             return True
 
@@ -3645,6 +3663,7 @@ class ANT(Policy):
             self._diag_event(
                 "trial_end", success=False, reason="timeout", error=str(e),
                 c1_code=self._c1_failure_code_pending,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
             )
             return False
         except UnexpectedContactError as e:
@@ -3654,6 +3673,7 @@ class ANT(Policy):
             self._diag_event(
                 "trial_end", success=False, reason="unexpected_contact",
                 error=str(e), c1_code=self._c1_failure_code_pending,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
             )
             return False
         except OutOfReachError as e:
@@ -3663,6 +3683,7 @@ class ANT(Policy):
             self._diag_event(
                 "trial_end", success=False, reason="out_of_reach",
                 error=str(e), c1_code=self._c1_failure_code_pending,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
             )
             return False
         except Exception as e:
@@ -3672,6 +3693,7 @@ class ANT(Policy):
             self._diag_event(
                 "trial_end", success=False, reason="exception", error=str(e),
                 c1_code=self._c1_failure_code_pending,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
             )
             return False
 
@@ -3709,6 +3731,7 @@ class ANT(Policy):
         # signature for each trial.
         try:
             final_obs = get_observation()
+            duration = round(self._elapsed_trial_sec(), 2)
             if final_obs is not None:
                 fp = final_obs.controller_state.tcp_pose.position
                 self._diag_event(
@@ -3717,9 +3740,15 @@ class ANT(Policy):
                     final_tcp_x=fp.x,
                     final_tcp_y=fp.y,
                     final_tcp_z=fp.z,
+                    duration_sec=duration,
                 )
             else:
-                self._diag_event("trial_end", success=success)
+                self._diag_event(
+                    "trial_end", success=success, duration_sec=duration,
+                )
         except Exception:
-            self._diag_event("trial_end", success=success)
+            self._diag_event(
+                "trial_end", success=success,
+                duration_sec=round(self._elapsed_trial_sec(), 2),
+            )
         return success

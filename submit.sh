@@ -60,11 +60,41 @@ REMOTE_IMAGE="${ECR_REGISTRY}/aic-team/${TEAM_NAME}:${TAG}"
 # Docker even starts, saving 5+ minutes vs catching it post-build.
 echo ""
 echo "=== Pre-build: v26 Workstream A unit tests ==="
-if python3 -m unittest discover -s ant_policy_node/tests -v >&2; then
+if python3 -m unittest discover -s ant_policy_node/tests -v; then
   echo "✓ v26 unit tests pass"
 else
   echo "✗ FATAL: v26 unit tests failed.  Aborting before build."
   exit 1
+fi
+
+# ── v26 / Workstream C2: T3 wall-clock gate from prior local sim ─────────────
+# If a recent local sim's policy.log is available (from `scripts/local_sim.sh`
+# or equivalent), grep the trial=3 trial_end event for `duration_sec=` and
+# refuse the push if T3 timed out.  The gate is SOFT: when no log is found
+# (e.g. first build of the day), it warns but does not block.  This way the
+# gate adds value when a sim has been run, but doesn't block fresh hosts.
+T3_LOG_PATH="${T3_LOG_PATH:-/tmp/ant_local_sim/policy.log}"
+echo ""
+echo "=== Pre-build: T3 wall-clock gate (Workstream C) ==="
+if [[ -f "$T3_LOG_PATH" ]]; then
+  T3_DUR=$(grep "ANT-DIAG event=trial_end trial=3" "$T3_LOG_PATH" 2>/dev/null \
+           | grep -oE 'duration_sec=[0-9.]+' | head -1 \
+           | awk -F= '{print $2}')
+  if [[ -z "$T3_DUR" ]]; then
+    echo "⚠ T3 wall-clock gate: no trial=3 trial_end found in $T3_LOG_PATH"
+    echo "  (run a local sim before submitting to enable this gate)"
+  else
+    # bash-only float compare (no bc dependency)
+    if awk "BEGIN{exit !($T3_DUR > 110)}"; then
+      echo "✗ FATAL: T3 wall-clock $T3_DUR s > 110 s threshold."
+      echo "  v25-class regression detected in local sim.  Aborting push."
+      exit 1
+    fi
+    echo "✓ T3 wall-clock $T3_DUR s ≤ 110 s"
+  fi
+else
+  echo "⚠ T3 wall-clock gate: $T3_LOG_PATH not found — gate skipped."
+  echo "  Set T3_LOG_PATH to your local sim's policy.log to enable."
 fi
 
 # ── Step 1: Build the image ────────────────────────────────────────────────────
@@ -187,8 +217,16 @@ ANT_MARKERS=(
 )
 # v26 strict-revert anti-markers: any of these strings appearing in the
 # built image's ANT.py copies indicates the v25 changes did NOT fully
-# revert.  The push is aborted if any anti-marker is present.
+# revert.  Push is aborted if any anti-marker is present.
+#
+# All strings below were verified absent from the v24 baseline ANT.py at
+# `git checkout e52c930` time (see review of commit b078aee).  v24 had a
+# benign `lateral_arrival_ff_scale_per_retry` (Bug 106) which would
+# false-positive on a bare `_ff_scale` substring — so CR-1/HR-1 are
+# detected via the `# CR-1` / `# HR-1` v25-commit-tag comments instead,
+# which are the unique substring v25 introduced.
 ANT_ANTI_MARKERS=(
+  # Bug 125/126/127 — T2 joint-space additions
   "enable_cable_overdrive"                 # Bug 127 — must be absent in v26
   "enable_two_stage_joint_move"            # Bug 127 — must be absent in v26
   "enable_multi_seed_ik"                   # Bug 126 — must be absent in v26
@@ -196,8 +234,13 @@ ANT_ANTI_MARKERS=(
   "BUG125 rel-to-current"                  # Bug 125 log marker — must be absent
   "BUG126 IK"                              # Bug 126 log marker — must be absent
   "BUG127 cable overdrive"                 # Bug 127 log marker — must be absent
-  "_ff_scale"                              # CR-1+HR-1 — must be absent
-  "_settle_abort"                          # HR-2 — must be absent
+  # v25 Stage 4 SC changes (the actual T3-regression cause per A2 audit)
+  "# CR-1"                                 # CR-1 baseline-adaptive feedforward
+  "# CR-2"                                 # CR-2 SC Stage 4 stiffness 85→200
+  "# CR-3"                                 # CR-3 force guard disable
+  "# HR-1"                                 # HR-1 ff cap
+  "# HR-2"                                 # HR-2 force-checked phase settle
+  "# MR-4"                                 # MR-4 Z-floor guard
 )
 IK_MARKERS=(
   "def solve_ik_dls"

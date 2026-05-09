@@ -61,7 +61,10 @@ Morning (parallel):
 
 Afternoon:
 - **A3 — v26 patch** (Eng-1). Branch off v24 commit `e52c930`. Cherry-pick
-  **nothing** from v25. Add:
+  **nothing** from v25. Bug 124 (diagnostic abort/signature plumbing)
+  shipped in v24 and is RETAINED in v26 — it only fires inside the
+  zone-guarded joint-space helper, costs nothing on T1/T3, and is
+  informationally cheap. Add:
   - Runtime guards in `_lateral_move_joint_space` and wrist_wrench sampler:
     `if (zone, idx) != ("sfp", T2_IDX): _diag_event("guard_violation"); return None`
   - `_remaining_trial_budget_sec()` accountant.
@@ -236,7 +239,13 @@ is what surfaced this bug during the v24 build.
 | **v24 (submission_835, 2026-05-07)** | **64.55** | T1=29.38 (tier_2=21.85, tier_3=6.53, dist=0.11 m), **T2=1.0 (tier_2=0, tier_3=0, dist=0.17 m — UNCHANGED from v22/v23)**, T3=34.17 (tier_2=11.82, tier_3=21.36, dist=0.04 m, Bug 122 yaw preserved). **Bug 124 discriminator FAILED to discriminate.**  Root cause: T2 init_dist ≈ 0.17 m ⇒ scoring bounding radius = init × 0.5 ≈ 0.085 m.  All three signature offsets land *outside* the 0.085 m radius, so tier_3 = 0 in every case (A: 0.19 m, B: 0.17 m, C: 0.17 m).  Tier_2 = 0 most consistent with **Case B** (joint move stalled with no scoreable motion) OR joint-space code path never entered — these two cannot be separated from score.json alone.  Source + install/ tree at merge commit `e52c930` verified to contain all 7 ANT_MARKERS (incl. `class JointSpaceDiagnosticAbort`, `enable_joint_space_diag_signatures`, `BUG124 diag signature`); submit.sh post-build verification gates push on these markers, so Bug 124 definitively shipped.  v25 must rescale signatures to fall *inside* the 0.085 m radius (signatures *at* port-XY rather than *offset from* commanded target) for the discriminator to actually work. |
 | **v25 (planned, branch claude/review-v24-results-n98FG)** | **TBD** | **Bug 125 — rescaled discriminator** (place signatures *inside* the 0.085 m bounding radius so tier_3 actually separates the cases): Case A parks at port-XY (dist ≈ 0 ⇒ tier_3 ≈ max), Case B unchanged (joint stall pose ⇒ tier_3 encodes residual), Case C parks at port-XY+(0,0,5cm) (XY dist ≈ 0 but distinct Z signature ⇒ tier_3 moderate, separable from A by sample of final Z).  **Bug 126 — Case-A countermeasure** (multi-seed IK + widen `joint_space_max_total_delta_rad` 0.6→1.0 rad): try IK from 5 seeds (current joints + ±0.2 rad on shoulder/elbow), accept the first that returns within widened cap.  **Bug 127 — Case-B countermeasure** (F-cable overdrive + two-stage joint move): query `wrist_wrench` to get cable force direction `F̂_cable`, set IK target to `port + 2 cm × F̂_cable` so spring force exceeds equilibrium even after the actual stall; split move into two stages (50% target, settle, 100% target) so each stage's joint impedance has a fresh error to drive against.  All three flag-gated; T1/T3 untouched.  **Skip Case-C fix (stay-in-joint-mode through Stage 4)** — too risky for first attempt, defer to v26 if v25 diagnostic shows Case C wins. |
 
-## 9-slot competition schedule (May 7-15, one submission/day)
+## 9-slot competition schedule (May 7-15, one submission/day) — DEPRECATED
+
+> **DEPRECATED 2026-05-09 (post-v25):** This schedule predates the v25
+> regression and the v26-v32 plan pivot. It is retained for historical
+> context only. The authoritative schedule is in **⚡ ACTIVE CAMPAIGN
+> PLAN — v26-v32** at the top of this file. Do not follow the table
+> below.
 
 Today is 2026-05-07. AIC permits one real-HW submission per day until May 15 ⇒
 **9 submission slots remaining**, including the May 15 final.  The May 15

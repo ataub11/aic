@@ -73,6 +73,7 @@ def _make_ant_skeleton():
         obj._hw_variance_record = ANT._hw_variance_record.__get__(obj)
         obj._trial_budget_begin = ANT._trial_budget_begin.__get__(obj)
         obj._remaining_trial_budget_sec = ANT._remaining_trial_budget_sec.__get__(obj)
+        obj._elapsed_trial_sec = ANT._elapsed_trial_sec.__get__(obj)
         # _high_tension is a property on the class — synthesize equivalent.
         obj.__class__ = type(
             "ANTLike", (object,),
@@ -190,6 +191,23 @@ class TestTrialBudgetAccountant(unittest.TestCase):
         time.sleep(0.05)
         self.assertEqual(obj._remaining_trial_budget_sec(), 0.0)
 
+    def test_elapsed_trial_sec_increases(self):
+        """`_elapsed_trial_sec` is the load-bearing helper for the
+        submit.sh T3 wall-clock gate — must monotonically increase from
+        ~0 after `_trial_budget_begin` and return 0.0 if not started."""
+        obj, have_ant = _make_ant_skeleton()
+        if not have_ant:
+            self.skipTest("ant_policy_node not importable in this env")
+        obj._trial_start_monotonic = None
+        self.assertEqual(obj._elapsed_trial_sec(), 0.0,
+                         "Pre-trial elapsed must be 0.0")
+        obj._trial_budget_begin(120.0)
+        e0 = obj._elapsed_trial_sec()
+        time.sleep(0.05)
+        e1 = obj._elapsed_trial_sec()
+        self.assertGreater(e1, e0)
+        self.assertLess(e0, 0.05)
+
 
 class TestZoneGuardEarlyReturn(unittest.TestCase):
     """The v26 zone guard at the entry of `_lateral_move_joint_space` must
@@ -218,14 +236,43 @@ class TestZoneGuardEarlyReturn(unittest.TestCase):
             target_xy=(0.0, 0.0), lateral_z=0.3, orient=None,
             move_robot=_bomb, get_observation=_bomb,
             start_time=None, time_limit_sec=120.0,
-            zone="sc", label="test",
+            zone="sc", label="test_label",
         )
         self.assertIsNone(result, "Guard must return None for non-SFP zone")
         obj._diag_event.assert_called_once()
         args, kwargs = obj._diag_event.call_args
         self.assertEqual(args[0], "joint_space_guard_violation")
         self.assertEqual(kwargs.get("zone"), "sc")
+        self.assertEqual(kwargs.get("label"), "test_label")
+        self.assertEqual(kwargs.get("reason"), "non_sfp_zone")
         self.assertEqual(obj._c1_failure_code_pending, "guard_violation")
+
+    def test_sfp_zone_proceeds_past_guard(self):
+        """Guard must NOT short-circuit for zone='sfp' — it should fall
+        through to the next early-return (enable_joint_space_lateral check).
+        Verifies the guard ordering isn't accidentally inverted in v26."""
+        try:
+            from ant_policy_node.ANT import ANT
+        except Exception:
+            self.skipTest("ant_policy_node not importable in this env")
+        obj = types.SimpleNamespace()
+        obj.enable_joint_space_lateral = False  # forces next early-return
+        obj.enable_lateral_arrival_check = True
+        obj._diag_event = MagicMock()
+        obj._c1_failure_code_pending = None
+        f = ANT._lateral_move_joint_space.__get__(obj)
+        # Should reach the (enable_joint_space_lateral=False) early-return,
+        # NOT the guard.  No diag event should fire, no C1 code recorded.
+        result = f(
+            target_xy=(0.0, 0.0), lateral_z=0.3, orient=None,
+            move_robot=lambda *a, **k: None,
+            get_observation=lambda *a, **k: None,
+            start_time=None, time_limit_sec=120.0,
+            zone="sfp", label="t2_sfp_test",
+        )
+        self.assertIsNone(result)
+        obj._diag_event.assert_not_called()
+        self.assertIsNone(obj._c1_failure_code_pending)
 
 
 if __name__ == "__main__":
