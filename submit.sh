@@ -54,6 +54,19 @@ fi
 LOCAL_TAGGED="${LOCAL_IMAGE}:${TAG}"
 REMOTE_IMAGE="${ECR_REGISTRY}/aic-team/${TEAM_NAME}:${TAG}"
 
+# ── v26 / A4: pre-build unit tests (Workstream A acceptance gate) ────────────
+# Tests run on the build host (no ROS imports needed for the green path).
+# A failure here means a v26 helper regressed; the build is aborted before
+# Docker even starts, saving 5+ minutes vs catching it post-build.
+echo ""
+echo "=== Pre-build: v26 Workstream A unit tests ==="
+if python3 -m unittest discover -s ant_policy_node/tests -v >&2; then
+  echo "✓ v26 unit tests pass"
+else
+  echo "✗ FATAL: v26 unit tests failed.  Aborting before build."
+  exit 1
+fi
+
 # ── Step 1: Build the image ────────────────────────────────────────────────────
 echo ""
 echo "=== Step 1: Building image ${LOCAL_TAGGED} ==="
@@ -163,13 +176,28 @@ ANT_MARKERS=(
   "class JointSpaceDiagnosticAbort"        # Bug 124 A/B/C discriminator class
   "enable_joint_space_diag_signatures"     # Bug 124 master toggle
   "BUG124 diag signature"                  # Bug 124 runtime log line
-  "diag_signatures_relative_to_current_pose"  # Bug 125 rescaled signatures
-  "BUG125 rel-to-current"                  # Bug 125 runtime log line
-  "enable_multi_seed_ik"                   # Bug 126 multi-seed IK toggle
-  "BUG126 IK"                              # Bug 126 runtime log line
-  "enable_cable_overdrive"                 # Bug 127 overdrive toggle
-  "enable_two_stage_joint_move"            # Bug 127 two-stage toggle
-  "BUG127 cable overdrive"                 # Bug 127 runtime log line
+  # ── v26 (Workstream A) sentinels ──────────────────────────────────────
+  # Reverted from v25: Bug 125/126/127 markers removed.  Their absence
+  # in the built image is the strict-revert acceptance gate.
+  "joint_space_guard_violation"            # v26 zone/trial guard event name
+  "enable_c1_diagnostic_signature"         # v26 C1 master toggle
+  "_c1_failure_code_pending"               # v26 C1 state
+  "enable_hw_variance_log"                 # v26 C5 master toggle
+  "_remaining_trial_budget_sec"            # v26 budget accountant
+)
+# v26 strict-revert anti-markers: any of these strings appearing in the
+# built image's ANT.py copies indicates the v25 changes did NOT fully
+# revert.  The push is aborted if any anti-marker is present.
+ANT_ANTI_MARKERS=(
+  "enable_cable_overdrive"                 # Bug 127 — must be absent in v26
+  "enable_two_stage_joint_move"            # Bug 127 — must be absent in v26
+  "enable_multi_seed_ik"                   # Bug 126 — must be absent in v26
+  "diag_signatures_relative_to_current_pose"  # Bug 125 — must be absent
+  "BUG125 rel-to-current"                  # Bug 125 log marker — must be absent
+  "BUG126 IK"                              # Bug 126 log marker — must be absent
+  "BUG127 cable overdrive"                 # Bug 127 log marker — must be absent
+  "_ff_scale"                              # CR-1+HR-1 — must be absent
+  "_settle_abort"                          # HR-2 — must be absent
 )
 IK_MARKERS=(
   "def solve_ik_dls"
@@ -202,6 +230,18 @@ for f in $ANT_FILES; do
     else
       echo "✗ MISSING: ANT.py [$f] lacks marker: $m"
       FAIL=1
+    fi
+  done
+  # v26 strict-revert gate: any anti-marker present means the revert was
+  # incomplete (something from v25 leaked into the deployed image).  This
+  # is the second half of "every change is flag-gated, default-off, sim-
+  # validated" — a v26 image that still contains v25 code paths is not v26.
+  for am in "${ANT_ANTI_MARKERS[@]}"; do
+    if grep -qF -e "$am" "$f" 2>/dev/null; then
+      echo "✗ ANTI-MARKER present in ANT.py [$f]: $am  (v25 code leaked through revert)"
+      FAIL=1
+    else
+      echo "✓ anti-marker absent ANT.py [$f]: $am"
     fi
   done
 done
