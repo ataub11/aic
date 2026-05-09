@@ -550,6 +550,18 @@ class ANT(Policy):
         # the v22 behaviour.
         self.enable_joint_space_lateral = True
         self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
+        # ---- B1 (v27 candidate): T1 SFP joint-space as escalation-only ----
+        # T1 typically scores ~29 (Bug 106 arrival-retry recovers most stalls)
+        # but on high-tension days it regresses to ~21 (v14/v17/v18/v25
+        # pattern).  B1 invokes `_lateral_move_joint_space` ONLY after Bug 106
+        # arrival retries have exhausted — never as primary lateral.  Worst
+        # case = same as v22-v24 (Cartesian fallback).
+        #
+        # Default-OFF (`False`) for v26 compatibility.  Tomorrow's bake-off
+        # decides whether v27 flips this on.  If flipped, requires a sim run
+        # showing T1 ≥ 50 with this path active and no guard violations.
+        self.joint_space_t1_sfp = False
+        self.joint_space_t1_residual_threshold_m = 0.025  # only escalate if >2.5cm
         self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
         self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
         self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
@@ -2256,7 +2268,7 @@ class ANT(Policy):
                 # Bug 115: arrival check + retry on T1 SFP lateral.  Previous
                 # builds shipped this only for T2/SC; sim 04-30c showed T1
                 # also stalled (0.0236 m residual) yet skipped any escalation.
-                _, _, orient = self._lateral_arrival_check_and_retry(
+                actual_x_t1, actual_y_t1, orient = self._lateral_arrival_check_and_retry(
                     target_xy=(tgt_x, tgt_y),
                     lateral_z=transit_z,
                     orient=orient,
@@ -2269,6 +2281,43 @@ class ANT(Policy):
                     base_ff_y=0.0,
                     base_stiffness=t1_lateral_stiffness,
                 )
+                # ---- B1 (v27 candidate): joint-space escalation on T1 ----
+                # If Bug 106 retries exhausted and T1 is still stalled
+                # > residual_threshold from the port, escalate to joint-space
+                # (which can deliver ~47 N at the TCP vs Cartesian's 15 N
+                # ceiling).  Default-OFF flag preserves v26 behaviour.  This
+                # block must NOT touch state if disabled — it's purely
+                # additive and falls back to whatever the arrival check left.
+                if self.joint_space_t1_sfp:
+                    if actual_x_t1 is not None and actual_y_t1 is not None:
+                        residual = math.hypot(
+                            tgt_x - actual_x_t1, tgt_y - actual_y_t1
+                        )
+                        if residual > self.joint_space_t1_residual_threshold_m:
+                            self._diag_event(
+                                "b1_t1_joint_space_escalation",
+                                residual_m=residual,
+                                tgt_xy=(tgt_x, tgt_y),
+                                actual_xy=(actual_x_t1, actual_y_t1),
+                            )
+                            js_result = self._lateral_move_joint_space(
+                                target_xy=(tgt_x, tgt_y),
+                                lateral_z=transit_z,
+                                orient=orient,
+                                move_robot=move_robot,
+                                get_observation=get_observation,
+                                start_time=start_time,
+                                time_limit_sec=time_limit_sec,
+                                zone="sfp",
+                                label="Stage 1 SFP T1 WP2 (B1 escalation)",
+                            )
+                            if js_result is not None:
+                                a_x, a_y, orient, ok = js_result
+                                if ok:
+                                    self.get_logger().info(
+                                        f"B1 T1 joint-space converged "
+                                        f"({a_x:.4f},{a_y:.4f})"
+                                    )
             obs_final = self._wait_for_observation(get_observation, start_time, time_limit_sec)
             orient_final = obs_final.controller_state.tcp_pose.orientation
             self.get_logger().info(
