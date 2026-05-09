@@ -54,6 +54,45 @@ fi
 LOCAL_TAGGED="${LOCAL_IMAGE}:${TAG}"
 REMOTE_IMAGE="${ECR_REGISTRY}/aic-team/${TEAM_NAME}:${TAG}"
 
+# ── Postmortem discipline: check previous slot's postmortem is filled ─────────
+# submit.sh for slot N checks that slot N-1's postmortem was completed.
+# The postmortem file is resolved by finding the most recent
+# sim_runs/run_*/postmortem_*.md that is NOT for the current TAG.
+# A missing or stub postmortem (file contains the literal "TODO") is a soft
+# warning — we don't block the push because the first run has no prior slot.
+PREV_POSTMORTEM=$(find ant_policy_node/sim_runs -name "postmortem_*.md" \
+  ! -name "postmortem_${TAG}.md" 2>/dev/null | sort | tail -1)
+if [[ -n "$PREV_POSTMORTEM" ]]; then
+  if grep -qF "TODO" "$PREV_POSTMORTEM" 2>/dev/null; then
+    echo "⚠ Prior postmortem not yet filled: $PREV_POSTMORTEM"
+    echo "  Fill it in before v27 to preserve institutional memory."
+  else
+    echo "✓ Prior postmortem filled: $PREV_POSTMORTEM"
+  fi
+fi
+
+# Create this slot's postmortem template now so it exists before push.
+THIS_POSTMORTEM="ant_policy_node/sim_runs/run_$(date -u +%Y-%m-%d)_${TAG}_postmortem/postmortem_${TAG}.md"
+if [[ ! -f "$THIS_POSTMORTEM" ]]; then
+  mkdir -p "$(dirname "$THIS_POSTMORTEM")"
+  cat > "$THIS_POSTMORTEM" <<POSTMORTEM_TEMPLATE
+# ${TAG} Postmortem — Submission $(date -u +%Y-%m-%d)
+
+**Score:** TODO — fill in after real-HW results arrive
+**vs prior:** TODO
+**Regression:** TODO (if any)
+
+## What happened
+
+TODO — fill in T1/T2/T3 breakdown and root cause after results arrive.
+
+## Process improvement
+
+TODO — one sentence: what would prevent this failure mode next time.
+POSTMORTEM_TEMPLATE
+  echo "✓ Postmortem template created: $THIS_POSTMORTEM"
+fi
+
 # ── v26 / A4: pre-build unit tests (Workstream A acceptance gate) ────────────
 # Tests run on the build host (no ROS imports needed for the green path).
 # A failure here means a v26 helper regressed; the build is aborted before
