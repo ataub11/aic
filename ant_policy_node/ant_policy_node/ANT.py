@@ -1628,9 +1628,40 @@ class ANT(Policy):
         return Quaternion(x=float(x), y=float(y), z=float(z), w=float(w))
 
     def _gripper_yaw_correction(self, zone: str) -> float:
-        """Look up the calibrated yaw correction for the current trial (Bug 99)."""
+        """Look up the calibrated yaw correction for the current trial (Bug 99).
+
+        B2a (v27 candidate): when the env var `ANT_T3_YAW_OVERRIDE_RAD` is
+        set AND zone == "sc" AND trial == 3, the override replaces the
+        table value.  This lets Eng-4 sweep candidate yaw values during
+        sim runs without re-committing ANT.py for each iteration.  The
+        env var is ONLY consulted in sim — it is not set by the eval
+        container, so production behaviour is unchanged when this branch
+        merges.  Logged on first use so any sim run records which yaw
+        was actually applied.
+        """
         if not self.enable_yaw_alignment:
             return 0.0
+        if zone == "sc" and self._insert_call_count == 3:
+            override = os.environ.get("ANT_T3_YAW_OVERRIDE_RAD")
+            if override is not None and override.strip():
+                try:
+                    val = float(override)
+                    if not getattr(self, "_b2a_override_logged", False):
+                        self.get_logger().info(
+                            f"B2A yaw override active: ('sc', 3) = {val:.4f} "
+                            f"(was {self.gripper_yaw_correction_rad.get(('sc', 3), 0.0):.4f})"
+                        )
+                        self._diag_event(
+                            "b2a_yaw_override",
+                            override_rad=val,
+                            baseline_rad=self.gripper_yaw_correction_rad.get(
+                                ("sc", 3), 0.0
+                            ),
+                        )
+                        self._b2a_override_logged = True
+                    return val
+                except ValueError:
+                    pass
         return self.gripper_yaw_correction_rad.get(
             (zone, self._insert_call_count), 0.0
         )
