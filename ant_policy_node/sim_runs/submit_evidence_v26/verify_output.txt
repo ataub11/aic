@@ -1,0 +1,88 @@
+tag=v26
+build_version=v26-df82c5c-dirty
+built_at=2026-05-09T02:23:14Z
+---
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: -1.7133
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: solve_ik_dls
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: def _lateral_move_joint_space
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_joint_space_lateral
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: class JointSpaceDiagnosticAbort
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_joint_space_diag_signatures
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG124 diag signature
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: joint_space_guard_violation
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_c1_diagnostic_signature
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: _c1_failure_code_pending
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_hw_variance_log
+✓ ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: _remaining_trial_budget_sec
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_cable_overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_two_stage_joint_move
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_multi_seed_ik
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: diag_signatures_relative_to_current_pose
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG125 rel-to-current
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG126 IK
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG127 cable overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-3
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # HR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # HR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # MR-4
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: -1.7133
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: solve_ik_dls
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: def _lateral_move_joint_space
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_joint_space_lateral
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: class JointSpaceDiagnosticAbort
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_joint_space_diag_signatures
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: BUG124 diag signature
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: joint_space_guard_violation
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_c1_diagnostic_signature
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: _c1_failure_code_pending
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_hw_variance_log
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: _remaining_trial_budget_sec
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_cable_overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_two_stage_joint_move
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: enable_multi_seed_ik
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: diag_signatures_relative_to_current_pose
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: BUG125 rel-to-current
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: BUG126 IK
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: BUG127 cable overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # CR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # CR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # CR-3
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # HR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # HR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ANT.py]: # MR-4
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: -1.7133
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: solve_ik_dls
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: def _lateral_move_joint_space
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_joint_space_lateral
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: class JointSpaceDiagnosticAbort
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_joint_space_diag_signatures
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG124 diag signature
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: joint_space_guard_violation
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_c1_diagnostic_signature
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: _c1_failure_code_pending
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_hw_variance_log
+✓ ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: _remaining_trial_budget_sec
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_cable_overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_two_stage_joint_move
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: enable_multi_seed_ik
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: diag_signatures_relative_to_current_pose
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG125 rel-to-current
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG126 IK
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: BUG127 cable overdrive
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # CR-3
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # HR-1
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # HR-2
+✓ anti-marker absent ANT.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ANT.py]: # MR-4
+✓ ur5e_kinematics.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def solve_ik_dls
+✓ ur5e_kinematics.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def geometric_jacobian
+✓ ur5e_kinematics.py [/ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def joint_state_to_ordered_array
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ur5e_kinematics.py]: def solve_ik_dls
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ur5e_kinematics.py]: def geometric_jacobian
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/ant_policy_node/ur5e_kinematics.py]: def joint_state_to_ordered_array
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def solve_ik_dls
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def geometric_jacobian
+✓ ur5e_kinematics.py [/ws_aic/src/aic/ant_policy_node/install/ant_policy_node/lib/python3.12/site-packages/ant_policy_node/ur5e_kinematics.py]: def joint_state_to_ordered_array
