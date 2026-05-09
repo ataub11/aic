@@ -65,6 +65,29 @@ sim confirmation is consistent with this finding** (both analyses predict
 T3 timeout would reproduce in sim under v25 code; the CR-2 stiffness
 increase + CR-3 force-guard disable is the direct mechanism).
 
+---
+
+## Independent verification of ant:v26 — 2026-05-09 evening
+
+- **Image:** `973918476471.dkr.ecr.us-east-1.amazonaws.com/aic-team/ant:v26`
+- **Pulled fresh from ECR:** digest `sha256:525a8367a5288ecd778f1f408ebd8f8aa554fdfdadc680fe78ad00d9f31a0be1`
+- **md5 match vs build evidence (`submit_evidence_v26/py_hashes.txt`):** PASS — all 3 copies `c4793e088180c0005bc6c20ebf48a683`
+- **Markers (4 × 3 ANT.py copies):**
+  - `-1.7133` (Bug 122 yaw): PRESENT (n=1) in all 3 copies ✅
+  - `joint_space_guard_violation` (zone guard): PRESENT (n=1) in all 3 copies ✅
+  - `_remaining_trial_budget_sec` (budget accountant): PRESENT (n=2) in all 3 copies ✅
+  - `enable_c1_diagnostic_signature` (C1 channel): PRESENT (n=2) in all 3 copies ✅
+- **Anti-markers (5 × 3 ANT.py copies):** all absent ✅
+  - `enable_cable_overdrive` (Bug 127): absent in all 3 copies ✅
+  - `BUG125 rel-to-current` (Bug 125): absent in all 3 copies ✅
+  - `# CR-2`: absent in all 3 copies ✅
+  - `# CR-3`: absent in all 3 copies ✅
+  - `# HR-1`: absent in all 3 copies ✅
+- **Verdict:** PASS — image in ECR matches build evidence; no anti-markers present.
+- **Signed:** Allison + Claude Sonnet 4.6 (solo-build; independent human reviewer not available — waived per checklist Day-1 rule)
+
+---
+
 ## Note on A0
 
 A0 (local sim repro with ant:v25) was not run due to eval-container
