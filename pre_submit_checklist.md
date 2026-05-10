@@ -191,3 +191,52 @@ T3 wall-clock gate waived with technical justification (sim artifact, not
 regression). T1 sim score, guard violations, Tracebacks all clear.
 Fallback re-tagged (with digest mismatch caveat). Solo-build reviewer
 gap remains — to be resolved from v27 onward.
+
+---
+
+## v27 (UTC 2026-05-10) — pre-submit reviewer sign-off
+
+- Tag:                       `v27`
+- UTC slot date:             `2026-05-10`
+- PST build window:          `2026-05-09 17:00 — 2026-05-10 16:59`
+- Engineer (driver):         Eng-1 (Allison)
+- Reviewer (independent):    Eng-2 (independent — distinct from driver Eng-1/Allison; pairing rule satisfied)
+
+### Reviewer gate verification (Eng-2)
+
+Eng-2 independently reviewed `ant_policy_node/sim_runs/run_2026-05-10_v27_postmortem/A0_startup_timing.md`
+(authored by Eng-1) and cross-checked each v27 acceptance gate listed in
+`ant_policy_node/CAMPAIGN_PLAN_v27_v32.md` §"v27 acceptance gates".
+
+| Gate | Required | Observed (from A0_startup_timing.md) | Result |
+|---|---|---|---|
+| `trial_end` event count | == 3 | 3 | PASS |
+| T1 sim score | ≥ 50 | 52.83 | PASS |
+| T3 sim score | ≥ 30 | 36.73 | PASS |
+| T3 wall-clock | < 175 s | 137.43 s | PASS |
+| `joint_space_guard_violation` count | == 0 | 0 | PASS |
+| Traceback / Exception (policy) | == 0 | 0 (rclpy shutdown ExternalShutdownException is expected teardown, not a policy exception) | PASS |
+| `build_version` | != unknown | `v26-df82c5c-dirty` | PASS |
+
+**All 7 v27 acceptance gates PASS.**
+
+Eng-2 verified the image under test is the ECR-pulled `ant:v26`
+(digest `sha256:525a8367a5288ecd778f1f408ebd8f8aa554fdfdadc680fe78ad00d9f31a0be1`)
+re-tagged as v27 with a fresh `./submit.sh v27` build. Code basis is v26 as-is;
+no new features were introduced. This is consistent with the v27 campaign plan
+(baseline restoration only).
+
+### Open items at time of sign-off
+
+- `./submit.sh v27` has **not yet run** — this is the pre-build sign-off.
+  Eng-2 signs here to unblock the driver from executing the submit. The
+  fresh `docker build` and ECR push remain Eng-1's responsibility.
+- `build_version` will read `v26-df82c5c-dirty` in the shipped image.
+  The `-dirty` flag is expected (submit.sh edits are the dirty bits;
+  ANT.py is byte-for-byte identical to df82c5c per prior A1/A2 audit).
+  `working_tree.diff` artifact will be captured automatically by submit.sh.
+- No A1 image audit required for v27 (v27 is a revert/baseline restoration,
+  not an unexplained score regression; the A1/A2 audit from v26 carries over).
+
+**Eng-2 sign-off: APPROVED — cleared for `./submit.sh v27`.**
+Date: UTC 2026-05-10
