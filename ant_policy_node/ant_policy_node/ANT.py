@@ -517,6 +517,7 @@ class ANT(Policy):
         self.enable_lateral_arrival_check = True
         self.lateral_arrival_tolerance_m = 0.027  # 2.7 cm (vs 2.5 cm baseline)
         self.lateral_arrival_max_retries = 2
+        self.sc_arrival_max_retries = 4   # B2a (v29): SC-specific retry count; generic uses lateral_arrival_max_retries
         self.lateral_arrival_ff_scale_per_retry = 0.5     # +50% ff each retry
         self.lateral_arrival_ff_cap_n = 9.0               # never exceed this
         self.lateral_arrival_stiffness_step_n_per_m = 50.0  # +50 N/m each retry
@@ -551,6 +552,7 @@ class ANT(Policy):
         self.enable_joint_space_lateral = True
         self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
         self.joint_space_t1_sfp = False             # B1 (v28): T1 joint-space escalation; default-off
+        self.joint_space_sc_wp2 = False   # B2b (v29): SC WP2 joint-space escalation; default-off; ships only if err_mm < 20 in sim
         self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
         self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
         self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
@@ -855,6 +857,7 @@ class ANT(Policy):
         label: str,
         base_ff_y: float,
         base_stiffness,
+        max_retries=None,
     ):
         """Verify the arm reached the lateral target; retry with escalated
         feedforward and stiffness if not.
@@ -900,7 +903,8 @@ class ANT(Policy):
             f"escalating feedforward + stiffness (Bug 106)"
         )
 
-        max_retries = self.lateral_arrival_max_retries
+        max_retries = (max_retries if max_retries is not None
+                       else self.lateral_arrival_max_retries)
         ff_cap = self.lateral_arrival_ff_cap_n
         stiff_cap = self.lateral_arrival_stiffness_cap_n_per_m
         # Anchor escalation against whatever lateral move was just attempted.
@@ -1189,7 +1193,8 @@ class ANT(Policy):
         # NOTE: this guard runs FIRST so it cannot be bypassed by future
         # toggles of `enable_lateral_arrival_check` or
         # `enable_joint_space_lateral` (Eng-3/Eng-4 feedback on b078aee).
-        if zone != "sfp":
+        sc_allowed = self.joint_space_sc_wp2 and (zone == "sc")
+        if zone != "sfp" and not sc_allowed:
             self._diag_event(
                 "joint_space_guard_violation",
                 zone=zone, label=label, reason="non_sfp_zone",
@@ -2444,7 +2449,30 @@ class ANT(Policy):
             label="Stage 1 SC WP2",
             base_ff_y=ff_y,
             base_stiffness=lateral_stiffness,
+            max_retries=self.sc_arrival_max_retries,
         )
+
+        # B2b (v29): SC WP2 joint-space escalation after B2a retries exhaust.
+        # Fires ONLY if the flag is set and budget allows — never as primary.
+        # Falls through to the existing Cartesian path if joint-space fails
+        # (js_result is None or ok is False), so worst case = B2a score.
+        if self.joint_space_sc_wp2 and self._remaining_trial_budget_sec() > 25.0:
+            js_result_sc = self._lateral_move_joint_space(
+                target_xy=(base_x + bias_dx, base_y + bias_dy),
+                lateral_z=lateral_z,
+                orient=orient,
+                zone="sc",
+                label="Stage 1 SC WP2 B2b escalation",
+                move_robot=move_robot,
+                get_observation=get_observation,
+                start_time=start_time,
+                time_limit_sec=time_limit_sec,
+            )
+            if js_result_sc is not None:
+                actual_x_sc, actual_y_sc, orient, ok_sc = js_result_sc
+                if ok_sc:
+                    # proceed to WP3 descent from joint-space final position
+                    _wp2b_x, _wp2b_y = actual_x_sc, actual_y_sc
 
         # ---- WP3: descend to transit_z (only if we're not already there) ----
         if need_descent:
