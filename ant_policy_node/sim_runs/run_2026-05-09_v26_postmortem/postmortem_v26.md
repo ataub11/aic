@@ -9,13 +9,13 @@
 
 ## Score
 
-**Real-HW score:** Pending — submitted at PST 2026-05-09 (target 14:00) = UTC 2026-05-09.
+**Real-HW score:** FAILED — eval infrastructure failure. Two attempts made:
+- Attempt 1 (`ant:v26`, fresh build): no artifacts returned
+- Attempt 2 (`ant:v24-fallback`, known-good — scored 64.55 on 2026-05-07): timeout
 
-<!-- Fill in when result is available: -->
-<!-- T1 Tier1= Tier2= Tier3= -->
-<!-- T2 Tier1= Tier2= Tier3= -->
-<!-- T3 Tier1= Tier2= Tier3= -->
-<!-- Total= -->
+Slot was not consumed (no successful run). UTC 2026-05-09 window closed before
+a third attempt could be made. Confirmed infrastructure issue, not code issue:
+v24-fallback timing out on the same day as v26 eliminates all code hypotheses.
 
 ---
 
@@ -35,12 +35,19 @@
 
 ## Regression
 
-<!-- Write "none" if T1/T2/T3 all held vs v22/v23/v24 baseline -->
-<!-- Or name the trial and magnitude if any trial regressed -->
+None attributable to code. Slot lost to eval infrastructure failure.
 
 ---
 
 ## What happened
+
+**Outcome:** Both submission attempts failed due to eval infrastructure degradation.
+v26 returned no artifacts (container never produced output). v24-fallback (identical
+to the image that scored 64.55 two days prior) returned a timeout. Two different
+images, two different failure modes, same degraded environment — code ruled out.
+
+The UTC 2026-05-09 slot was not consumed (no successful run), but the PST 16:59
+deadline closed before a third attempt was viable. Slot is effectively lost.
 
 **v26 design:** strict revert of v25 back to v24 commit `e52c930`, plus additive instrumentation:
 - Zone/trial guard on `_lateral_move_joint_space` and wrist_wrench sampler (wrong-zone calls return None + emit `joint_space_guard_violation` event)

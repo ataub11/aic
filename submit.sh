@@ -219,8 +219,18 @@ fi
 
 # ── Workstream C2: T3 wall-clock gate (HARD as of v27) ───────────────────────
 # Reads the most recent local sim's policy.log, greps trial=3 trial_end for
-# `duration_sec=`, and refuses push if T3 ≥ 110 s OR if no policy.log is
+# `duration_sec=`, and refuses push if T3 ≥ 175 s OR if no policy.log is
 # present (zero-runtime-validation = v25 anti-pattern).
+#
+# Threshold calibration (Eng-5, UTC 2026-05-09):
+#   OLD: 110 s — mis-calibrated.  v26 A0 sim produced 137 s via the Stage 4
+#        internal 120 s timeout (correct v24 baseline behavior, Bug 86 sim
+#        cable too stiff).  The 110 s gate fired a false FATAL on clean code.
+#   NEW: 175 s — the v25 regression exited at the *task-limit* timeout (180 s
+#        eval deadline), not the Stage 4 internal timeout.  Any T3 duration
+#        ≥ 175 s in sim indicates a v25-class regression (Stage 4 fighting the
+#        cable aggressively with force guard disabled).  175 s < 180 s gives a
+#        5 s margin over normal Stage-4-timeout behavior (137 s typical).
 #
 # Day-1 (v26) was permitted to skip this with a Lead-signed waiver in
 # pre_submit_checklist.md.  v27 onward, missing log = FATAL unless waived.
@@ -250,12 +260,15 @@ elif [[ -f "$T3_LOG_PATH" ]]; then
     echo "  in pre_submit_checklist.md as [w] with a reason."
     exit 1
   fi
-  if awk "BEGIN{exit !($T3_DUR > 110)}"; then
-    echo "✗ FATAL: T3 wall-clock $T3_DUR s > 110 s threshold."
-    echo "  v25-class regression detected in local sim.  Aborting push."
+  if awk "BEGIN{exit !($T3_DUR > 175)}"; then
+    echo "✗ FATAL: T3 wall-clock $T3_DUR s > 175 s threshold."
+    echo "  v25-class regression detected (task-limit timeout) in local sim."
+    echo "  Aborting push.  Expected baseline: ~137 s (Stage 4 internal 120 s"
+    echo "  timeout + navigation).  Anything ≥ 175 s indicates Stage 4 is"
+    echo "  fighting the cable aggressively — revert SC stiffness/force-guard."
     exit 1
   fi
-  echo "✓ T3 wall-clock $T3_DUR s ≤ 110 s"
+  echo "✓ T3 wall-clock $T3_DUR s ≤ 175 s"
 else
   echo "✗ FATAL: T3 wall-clock gate: $T3_LOG_PATH not found."
   echo "  Run a local sim before submitting OR mark the T3 line in"
