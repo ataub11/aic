@@ -309,13 +309,16 @@ ECR, pushes nothing new. Verifies digest equality before portal click.
 
 ## Immediate tonight actions
 
-| # | Action | Owner | By |
+| # | Action | Owner | Status |
 |---|---|---|---|
-| 1 | Fill `postmortem_v26.md` Score field: "infrastructure failure — v26 no artifacts, v24-fallback timeout" | Eng-1 | Tonight |
-| 2 | Startup timing test: eval-compose + ECR-pulled `ant:v26`; record to `A0_startup_timing.md` | Eng-1 | Tonight |
-| 3 | Run v27 local sim; capture `/tmp/ant_local_sim/policy.log` | Eng-1 | Tonight |
-| 4 | Fix submit.sh T3 gate 110 s → 175 s with calibration comment | Eng-5 | **Done** (this session) |
-| 5 | Assign Eng-2 as independent reviewer for v27 | Lead A | Tonight |
-| 6 | Eng-3: begin B1 implementation in feature branch (no merge yet) | Eng-3 | Tonight/morning |
-| 7 | Eng-4: B2a parameter analysis — SC WP2 retry budget vs trial wall-clock | Eng-4 | Tonight/morning |
-| 8 | Both leads review and sign this plan | Lead A + Lead B | Before bed |
+| 1 | Fill `postmortem_v26.md` Score field: "infrastructure failure — v26 no artifacts, v24-fallback timeout" | Eng-1 | ✅ Done (commit `ba9650b`) |
+| 2 | Startup timing test: eval-compose + ECR-pulled `ant:v26`; record to `A0_startup_timing.md` | Eng-1 | ✅ Done — 12.6 s to Active (commit `cf80311`) |
+| 3 | Run v27 local sim; capture `/tmp/ant_local_sim/policy.log` | Eng-1 | ✅ Done — policy.log at `/tmp/ant_local_sim/policy.log` |
+| 4 | Fix submit.sh T3 gate 110 s → 175 s with calibration comment | Eng-5 | ✅ Done (commit `ba9650b`) |
+| 5 | Assign Eng-2 as independent reviewer for v27 | Lead A | ✅ Done — Eng-2 signed (commit `28d5080`) |
+| 6 | Eng-3: begin B1 implementation in feature branch (no merge yet) | Eng-3 | ✅ Done — branch `claude/b1-joint-space-t1-sfp` (commit `75fb288`) |
+| 7 | Eng-4: B2a parameter analysis — SC WP2 retry budget vs trial wall-clock | Eng-4 | ✅ Done — `sc_arrival_max_retries=4` approved (commit `0d494c1`) |
+| 8 | Both leads review and sign this plan | Lead A + Lead B | ⏳ Pending |
+
+**Pre-submit team meeting notes:** `sim_runs/run_2026-05-10_v27_postmortem/team_meeting_pre_submit.md`
+**v27 decision: GO** — all acceptance gates pass, Eng-2 signed. Target `./submit.sh v27` ≤ 14:00 PST.
