@@ -550,6 +550,7 @@ class ANT(Policy):
         # the v22 behaviour.
         self.enable_joint_space_lateral = True
         self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
+        self.joint_space_t1_sfp = False             # B1 (v28): T1 joint-space escalation; default-off
         self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
         self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
         self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
@@ -2269,6 +2270,27 @@ class ANT(Policy):
                     base_ff_y=0.0,
                     base_stiffness=t1_lateral_stiffness,
                 )
+                # B1 (v28): joint-space escalation after Bug 106 retries exhaust.
+                # Fires ONLY if the flag is set and budget allows — never as primary.
+                # Falls through to the existing Cartesian path if joint-space fails
+                # (js_result is None or ok is False), so worst case = v27 score.
+                if self.joint_space_t1_sfp and self._remaining_trial_budget_sec() > 25.0:
+                    js_result = self._lateral_move_joint_space(
+                        target_xy=(tgt_x, tgt_y),
+                        lateral_z=transit_z,
+                        orient=orient,
+                        zone="sfp",
+                        label="Stage 1 SFP T1 WP2 escalation",
+                        move_robot=move_robot,
+                        get_observation=get_observation,
+                        start_time=start_time,
+                        time_limit_sec=time_limit_sec,
+                    )
+                    if js_result is not None:
+                        actual_x, actual_y, orient, ok = js_result
+                        if ok:
+                            # proceed to Stage 2 from joint-space final position
+                            tgt_x, tgt_y = actual_x, actual_y
             obs_final = self._wait_for_observation(get_observation, start_time, time_limit_sec)
             orient_final = obs_final.controller_state.tcp_pose.orientation
             self.get_logger().info(
