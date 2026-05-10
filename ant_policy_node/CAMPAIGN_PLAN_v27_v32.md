@@ -15,10 +15,13 @@ what to build, who owns it, and what gates must pass before each push.
 |---|---|---|
 | 2026-05-08 | v25 | 23.03 — **our regression** (CR-2/CR-3 Stage 4 changes, unvalidated) |
 | 2026-05-09 | v26 + v24-fallback | **Both failed — eval infrastructure degraded** |
-| 2026-05-10 | v27 | **Next. Must restore baseline.** |
+| 2026-05-10 | v27 | **64.21 — baseline confirmed ✓** (T1=29.16, T2=1.0, T3=34.06) |
+| 2026-05-11 | v28 | **Next. Ship B1 (`joint_space_t1_sfp=True`).** |
 
-Six slots remain (v27–v32). Current validated real-HW ceiling: ~64 pts
-(T1≈29, T2=1, T3≈34). Target: ≥86 primary, ≥101 stretch. Gap: +22 pts.
+Five slots remain (v28–v32). Current validated real-HW ceiling: 64.21 pts
+(T1=29.16, T2=1, T3=34.06, submission_1009 UTC 2026-05-10). Target: ≥86 primary, ≥101 stretch. Gap: +22 pts.
+
+**v27 → v28 decision: GO on B1.** v27=64.21 ≥ 60 threshold. Infrastructure confirmed healthy. B1 branch `claude/b1-joint-space-t1-sfp` (commit 75fb288) ready; flip `joint_space_t1_sfp = False → True`, pass sim gates.
 
 **T2 is closed as an engineering target for this campaign.**
 Four slots produced zero T2 improvement. The 15 N Cartesian ceiling is real.
