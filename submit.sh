@@ -485,7 +485,7 @@ fi
 # code added MORE instances on top of v24's existing one).
 for f in $ANT_FILES; do
   for m in "${ANT_MARKERS[@]}"; do
-    n=$(grep -cF -e "$m" "$f" 2>/dev/null || echo 0)
+    n=$(grep -cF -e "$m" "$f" 2>/dev/null); n=${n:-0}
     if (( n >= 1 )); then
       echo "✓ ANT.py [$f]: $m (n=$n)"
     else
@@ -498,7 +498,7 @@ for f in $ANT_FILES; do
   # is the second half of "every change is flag-gated, default-off, sim-
   # validated" — a v26 image that still contains v25 code paths is not v26.
   for am in "${ANT_ANTI_MARKERS[@]}"; do
-    n=$(grep -cF -e "$am" "$f" 2>/dev/null || echo 0)
+    n=$(grep -cF -e "$am" "$f" 2>/dev/null); n=${n:-0}
     if (( n == 0 )); then
       echo "✓ anti-marker absent ANT.py [$f]: $am (n=0)"
     else
@@ -510,7 +510,7 @@ done
 
 for f in $IK_FILES; do
   for m in "${IK_MARKERS[@]}"; do
-    n=$(grep -cF -e "$m" "$f" 2>/dev/null || echo 0)
+    n=$(grep -cF -e "$m" "$f" 2>/dev/null); n=${n:-0}
     if (( n >= 1 )); then
       echo "✓ ur5e_kinematics.py [$f]: $m (n=$n)"
     else
