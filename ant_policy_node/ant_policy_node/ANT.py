@@ -550,7 +550,7 @@ class ANT(Policy):
         # the v22 behaviour.
         self.enable_joint_space_lateral = True
         self.joint_space_t2_sfp = True              # use joint-space for T2 WP2
-        self.joint_space_t1_sfp = False             # B1 (v28): T1 joint-space escalation; default-off
+        self.joint_space_t1_sfp = True              # B1 (v28): T1 joint-space escalation; enabled for v28
         self.joint_space_arrival_tol_m = 0.020      # 2 cm — tighter than Cartesian
         self.joint_space_max_step_rad = 0.15        # IK per-iteration cap
         self.joint_space_max_total_delta_rad = 0.6  # 34° — reject if IK proposes more
