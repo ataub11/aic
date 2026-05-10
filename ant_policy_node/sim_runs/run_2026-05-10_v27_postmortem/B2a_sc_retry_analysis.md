@@ -10,22 +10,30 @@ implementing it in v29. Analysis only — no code changes.
 ## Executive Summary
 
 The proposed `sc_arrival_max_retries = 4` (two additional retries over the
-current `lateral_arrival_max_retries = 2`) is **safe**. Worst-case wall-clock
-with 4 retries each consuming their full 18 s timeout is **~173 s**, leaving a
-**7 s margin** against the 180 s trial limit. The risk is real but acceptable
-given:
+current `lateral_arrival_max_retries = 2`) is **safe**.
+
+**Current (N=2 retries):** Worst-case trial total = **~173 s**, leaving a
+**~7 s margin** against the 180 s limit. Stage 4 runs its full 120 s.
+
+**Proposed (N=4 retries):** 4 × 18 s worst-case retry overhead = 72 s.
+Pre-Stage-4 time = **~89.4 s**. Stage 4 self-adjusts to the remaining budget:
+**90.6 s effective** (not the full 120 s). Trial total = **~180.0 s** — at
+the trial limit, no overrun. Stage 4 still runs **84.6 s above the 6 s settle
+window** (spiral executes; insertion is still attempted). The risk is real but
+acceptable given:
 
 1. The 18 s per-retry timeout is a hard ceiling (controller stall detection
    fires before the clock runs out on normal days), so 4 × 18 s = 72 s is a
    genuine worst case, not the expected case.
-2. Stage 2+3 are short (< 7 s combined from sim data). Stage 4 is bounded by
-   the 120 s internal timeout, which in practice is the binding constraint —
-   not retries.
+2. Stage 4 is self-adjusting: it exits at whichever comes first — its 120 s
+   internal timer or the global 180 s trial limit. With N=4 worst case, Stage 4
+   compresses to 90.6 s and the trial terminates cleanly at the limit.
 3. If even one retry succeeds before 18 s the budget recovers proportionally.
 
 **Recommendation: ship `sc_arrival_max_retries = 4` in v29.** No cap at 3 is
 necessary, but the v29 implementation should include a brief comment noting
-the 7 s worst-case margin so reviewers do not flag it without context.
+that Stage 4 compresses to ~91 s worst case so reviewers do not flag it without
+context.
 
 ---
 
